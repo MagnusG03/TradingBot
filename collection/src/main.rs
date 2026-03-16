@@ -4,11 +4,18 @@ use serde_json::Value;
 use std::error::Error;
 
 #[derive(Debug)]
-struct PredictionMarket {
+struct PolymarketPrediction {
     question: String,
-    subtitle: Option<String>,
     outcomes: Vec<String>,
     outcome_prices: Vec<f64>,
+}
+
+#[derive(Debug)]
+struct KalshiPrediction {
+    title: String,
+    subtitle: Option<String>,
+    yes_price: f64,
+    no_price: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,9 +74,48 @@ struct SecFiling {
     filing_url: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct PolymarketMarket {
+    question: String,
+    #[serde(default)]
+    outcomes: Option<String>,
+    #[serde(default, rename = "outcomePrices")]
+    outcome_prices: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PolymarketEvent {
+    #[serde(default)]
+    markets: Vec<PolymarketMarket>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MarketsResponse {
+    markets: Vec<KalshiMarket>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KalshiMarket {
+    title: String,
+    #[serde(default)]
+    subtitle: String,
+    #[serde(default, rename = "yes_sub_title")]
+    yes_sub_title: String,
+    #[serde(default, rename = "no_sub_title")]
+    no_sub_title: String,
+    yes_bid: Option<i64>,
+    no_bid: Option<i64>,
+    #[serde(default, rename = "yes_bid_dollars")]
+    yes_bid_dollars: Option<String>,
+    #[serde(default, rename = "no_bid_dollars")]
+    no_bid_dollars: Option<String>,
+    #[serde(default, rename = "last_price_dollars")]
+    last_price_dollars: Option<String>,
+}
+
 enum FetchResult {
-    Polymarket(Vec<PredictionMarket>),
-    Kalshi(Vec<PredictionMarket>),
+    Polymarket(Vec<PolymarketPrediction>),
+    Kalshi(Vec<KalshiPrediction>),
     Reddit(Value),
     SecEdgar(Vec<SecFiling>),
 }
@@ -78,29 +124,7 @@ enum FetchResult {
 async fn fetch_polymarket(
     url: &str,
     client: &Client,
-) -> Result<Vec<PredictionMarket>, Box<dyn Error>> {
-    #[derive(Debug, Deserialize)]
-    struct PolymarketMarket {
-        id: String,
-        slug: String,
-        question: String,
-        #[serde(default)]
-        outcomes: Option<String>,
-        #[serde(default, rename = "outcomePrices")]
-        outcome_prices: Option<String>,
-        #[serde(default, rename = "clobTokenIds")]
-        clob_token_ids: Option<String>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct PolymarketEvent {
-        id: String,
-        slug: String,
-        title: String,
-        #[serde(default)]
-        markets: Vec<PolymarketMarket>,
-    }
-
+) -> Result<Vec<PolymarketPrediction>, Box<dyn Error>> {
     let after_event = url
         .split("/event/")
         .nth(1)
@@ -144,9 +168,8 @@ async fn fetch_polymarket(
             })
             .unwrap_or_default();
 
-        Ok(vec![PredictionMarket {
+        Ok(vec![PolymarketPrediction {
             question: market.question,
-            subtitle: None,
             outcomes,
             outcome_prices,
         }])
@@ -164,7 +187,7 @@ async fn fetch_polymarket(
             .json::<PolymarketEvent>()
             .await?;
 
-        let prediction_markets: Vec<PredictionMarket> = event
+        let prediction_markets: Vec<PolymarketPrediction> = event
             .markets
             .into_iter()
             .map(|market| {
@@ -186,9 +209,8 @@ async fn fetch_polymarket(
                     })
                     .unwrap_or_default();
 
-                PredictionMarket {
+                PolymarketPrediction {
                     question: market.question,
-                    subtitle: None,
                     outcomes,
                     outcome_prices,
                 }
@@ -200,31 +222,7 @@ async fn fetch_polymarket(
 }
 
 // Gets all questions and outcome likelyhoods for the given Kalshi event at this current time.
-async fn fetch_kalshi(url: &str, client: &Client) -> Result<Vec<PredictionMarket>, Box<dyn Error>> {
-    #[derive(Debug, Deserialize)]
-    struct MarketsResponse {
-        markets: Vec<KalshiMarket>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct KalshiMarket {
-        title: String,
-        #[serde(default)]
-        subtitle: String,
-        #[serde(default, rename = "yes_sub_title")]
-        yes_sub_title: String,
-        #[serde(default, rename = "no_sub_title")]
-        no_sub_title: String,
-        yes_bid: Option<i64>,
-        no_bid: Option<i64>,
-        #[serde(default, rename = "yes_bid_dollars")]
-        yes_bid_dollars: Option<String>,
-        #[serde(default, rename = "no_bid_dollars")]
-        no_bid_dollars: Option<String>,
-        #[serde(default, rename = "last_price_dollars")]
-        last_price_dollars: Option<String>,
-    }
-
+async fn fetch_kalshi(url: &str, client: &Client) -> Result<Vec<KalshiPrediction>, Box<dyn Error>> {
     fn parse_price_dollars(value: Option<&str>) -> Option<f64> {
         value.and_then(|raw| raw.parse::<f64>().ok())
     }
@@ -257,23 +255,20 @@ async fn fetch_kalshi(url: &str, client: &Client) -> Result<Vec<PredictionMarket
         .map(|market| {
             let subtitle = choose_subtitle(&market);
 
-            PredictionMarket {
-                question: market.title,
+            KalshiPrediction {
+                title: market.title,
                 subtitle,
-                outcomes: vec!["Yes".to_string(), "No".to_string()],
-                outcome_prices: vec![
-                    parse_price_dollars(market.yes_bid_dollars.as_deref())
-                        .or_else(|| market.yes_bid.map(|value| value as f64 / 100.0))
-                        .or_else(|| parse_price_dollars(market.last_price_dollars.as_deref()))
-                        .unwrap_or(0.0),
-                    parse_price_dollars(market.no_bid_dollars.as_deref())
-                        .or_else(|| market.no_bid.map(|value| value as f64 / 100.0))
-                        .or_else(|| {
-                            parse_price_dollars(market.last_price_dollars.as_deref())
-                                .map(|last_price| 1.0 - last_price)
-                        })
-                        .unwrap_or(0.0),
-                ],
+                yes_price: parse_price_dollars(market.yes_bid_dollars.as_deref())
+                    .or_else(|| market.yes_bid.map(|value| value as f64 / 100.0))
+                    .or_else(|| parse_price_dollars(market.last_price_dollars.as_deref()))
+                    .unwrap_or(0.0),
+                no_price: parse_price_dollars(market.no_bid_dollars.as_deref())
+                    .or_else(|| market.no_bid.map(|value| value as f64 / 100.0))
+                    .or_else(|| {
+                        parse_price_dollars(market.last_price_dollars.as_deref())
+                            .map(|last_price| 1.0 - last_price)
+                    })
+                    .unwrap_or(0.0),
             }
         })
         .collect();
@@ -495,17 +490,28 @@ async fn main() {
     let identifier = "https://polymarket.com/event/2026-ncaa-tournament-winner";
 
     match fetch(identifier).await {
-        Ok(FetchResult::Polymarket(markets) | FetchResult::Kalshi(markets)) => {
+        Ok(FetchResult::Polymarket(markets)) => {
             if markets.is_empty() {
                 println!("No markets found.");
             } else {
                 for market in markets {
                     println!("Question: {}", market.question);
+                    println!("Outcomes: {:?}", market.outcomes);
+                    println!("Outcome prices: {:?}", market.outcome_prices);
+                }
+            }
+        }
+        Ok(FetchResult::Kalshi(markets)) => {
+            if markets.is_empty() {
+                println!("No markets found.");
+            } else {
+                for market in markets {
+                    println!("Question: {}", market.title);
                     if let Some(subtitle) = &market.subtitle {
                         println!("Subtitle: {}", subtitle);
                     }
-                    println!("Outcomes: {:?}", market.outcomes);
-                    println!("Outcome prices: {:?}", market.outcome_prices);
+                    println!("Outcomes: {:?}", ["Yes", "No"]);
+                    println!("Outcome prices: {:?}", [market.yes_price, market.no_price]);
                 }
             }
         }
