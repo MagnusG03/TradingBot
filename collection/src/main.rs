@@ -1,5 +1,4 @@
-use reqwest::{Client, StatusCode};
-use scraper::{Html, Selector};
+use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
 use std::error::Error;
@@ -7,6 +6,7 @@ use std::error::Error;
 #[derive(Debug)]
 struct PredictionMarket {
     question: String,
+    subtitle: Option<String>,
     outcomes: Vec<String>,
     outcome_prices: Vec<f64>,
 }
@@ -146,6 +146,7 @@ async fn fetch_polymarket(
 
         Ok(vec![PredictionMarket {
             question: market.question,
+            subtitle: None,
             outcomes,
             outcome_prices,
         }])
@@ -187,6 +188,7 @@ async fn fetch_polymarket(
 
                 PredictionMarket {
                     question: market.question,
+                    subtitle: None,
                     outcomes,
                     outcome_prices,
                 }
@@ -207,23 +209,35 @@ async fn fetch_kalshi(url: &str, client: &Client) -> Result<Vec<PredictionMarket
     #[derive(Debug, Deserialize)]
     struct KalshiMarket {
         title: String,
+        #[serde(default)]
+        subtitle: String,
+        #[serde(default, rename = "yes_sub_title")]
+        yes_sub_title: String,
+        #[serde(default, rename = "no_sub_title")]
+        no_sub_title: String,
         yes_bid: Option<i64>,
         no_bid: Option<i64>,
+        #[serde(default, rename = "yes_bid_dollars")]
+        yes_bid_dollars: Option<String>,
+        #[serde(default, rename = "no_bid_dollars")]
+        no_bid_dollars: Option<String>,
+        #[serde(default, rename = "last_price_dollars")]
+        last_price_dollars: Option<String>,
     }
 
-    #[derive(Debug, Deserialize)]
-    struct PriceRange {
-        start: String,
-        end: String,
-        step: String,
+    fn parse_price_dollars(value: Option<&str>) -> Option<f64> {
+        value.and_then(|raw| raw.parse::<f64>().ok())
     }
 
-    #[derive(Debug, Deserialize)]
-    struct MveLeg {
-        event_ticker: String,
-        market_ticker: String,
-        side: String,
-        yes_settlement_value_dollars: String,
+    fn choose_subtitle(market: &KalshiMarket) -> Option<String> {
+        [
+            market.subtitle.trim(),
+            market.yes_sub_title.trim(),
+            market.no_sub_title.trim(),
+        ]
+        .into_iter()
+        .find(|value| !value.is_empty())
+        .map(|value| value.to_string())
     }
 
     let event_ticker = url.rsplit('/').next().unwrap_or("").to_uppercase();
@@ -240,13 +254,27 @@ async fn fetch_kalshi(url: &str, client: &Client) -> Result<Vec<PredictionMarket
     let prediction_markets = data
         .markets
         .into_iter()
-        .map(|market| PredictionMarket {
-            question: market.title,
-            outcomes: vec!["Yes".to_string(), "No".to_string()],
-            outcome_prices: vec![
-                market.yes_bid.unwrap_or(0) as f64 / 100.0,
-                market.no_bid.unwrap_or(0) as f64 / 100.0,
-            ],
+        .map(|market| {
+            let subtitle = choose_subtitle(&market);
+
+            PredictionMarket {
+                question: market.title,
+                subtitle,
+                outcomes: vec!["Yes".to_string(), "No".to_string()],
+                outcome_prices: vec![
+                    parse_price_dollars(market.yes_bid_dollars.as_deref())
+                        .or_else(|| market.yes_bid.map(|value| value as f64 / 100.0))
+                        .or_else(|| parse_price_dollars(market.last_price_dollars.as_deref()))
+                        .unwrap_or(0.0),
+                    parse_price_dollars(market.no_bid_dollars.as_deref())
+                        .or_else(|| market.no_bid.map(|value| value as f64 / 100.0))
+                        .or_else(|| {
+                            parse_price_dollars(market.last_price_dollars.as_deref())
+                                .map(|last_price| 1.0 - last_price)
+                        })
+                        .unwrap_or(0.0),
+                ],
+            }
         })
         .collect();
 
@@ -464,7 +492,7 @@ async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
 
 #[tokio::main]
 async fn main() {
-    let identifier = "https://kalshi.com/markets/kxjensenmention/jensen-mention/kxjensenmention-26mar17";
+    let identifier = "https://polymarket.com/event/2026-ncaa-tournament-winner";
 
     match fetch(identifier).await {
         Ok(FetchResult::Polymarket(markets) | FetchResult::Kalshi(markets)) => {
@@ -473,6 +501,9 @@ async fn main() {
             } else {
                 for market in markets {
                     println!("Question: {}", market.question);
+                    if let Some(subtitle) = &market.subtitle {
+                        println!("Subtitle: {}", subtitle);
+                    }
                     println!("Outcomes: {:?}", market.outcomes);
                     println!("Outcome prices: {:?}", market.outcome_prices);
                 }
