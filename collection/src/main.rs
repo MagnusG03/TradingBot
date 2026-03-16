@@ -11,6 +11,70 @@ struct PredictionMarket {
     outcome_prices: Vec<f64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct SecSubmissions {
+    name: String,
+    #[serde(default)]
+    tickers: Vec<String>,
+    filings: SecFilings,
+}
+
+#[derive(Debug, Deserialize)]
+struct SecFilings {
+    recent: SecRecentFilings,
+}
+
+#[derive(Debug, Deserialize)]
+struct SecRecentFilings {
+    #[serde(rename = "accessionNumber", default)]
+    accession_numbers: Vec<String>,
+
+    #[serde(rename = "filingDate", default)]
+    filing_dates: Vec<String>,
+
+    #[serde(rename = "acceptanceDateTime", default)]
+    acceptance_datetimes: Vec<String>,
+
+    #[serde(rename = "form", default)]
+    forms: Vec<String>,
+
+    #[serde(rename = "items", default)]
+    items: Vec<String>,
+
+    #[serde(rename = "primaryDocument", default)]
+    primary_documents: Vec<String>,
+
+    #[serde(rename = "primaryDocDescription", default)]
+    primary_doc_descriptions: Vec<String>,
+
+    #[serde(rename = "isInlineXBRL", default)]
+    is_inline_xbrl: Vec<i32>,
+}
+
+#[derive(Debug)]
+struct SecFiling {
+    ticker: String,
+    company_name: String,
+    cik: String,
+    form: String,
+    filing_date: String,
+    acceptance_datetime: Option<String>,
+    accession_number: String,
+    primary_document: String,
+    primary_doc_description: Option<String>,
+    items: Option<String>,
+    is_inline_xbrl: bool,
+    filing_url: String,
+}
+
+enum FetchResult {
+    Polymarket(Vec<PredictionMarket>),
+    Kalshi(Vec<PredictionMarket>),
+    Reddit(Value),
+    SecEdgar(Vec<SecFiling>),
+}
+
+// Gets all questions and outcome likelyhoods for the given Polymarket event at this current time. If a specific market is given, only returns data for that market.
 async fn fetch_polymarket(
     url: &str,
     client: &Client,
@@ -133,6 +197,7 @@ async fn fetch_polymarket(
     }
 }
 
+// Gets all questions and outcome likelyhoods for the given Kalshi event at this current time.
 async fn fetch_kalshi(url: &str, client: &Client) -> Result<Vec<PredictionMarket>, Box<dyn Error>> {
     #[derive(Debug, Deserialize)]
     struct MarketsResponse {
@@ -188,22 +253,221 @@ async fn fetch_kalshi(url: &str, client: &Client) -> Result<Vec<PredictionMarket
     Ok(prediction_markets)
 }
 
-async fn fetch(url: &str) -> Result<Vec<PredictionMarket>, Box<dyn Error>> {
+// Currently unimplemented due to Reddit API restrictions.
+async fn fetch_reddit(
+    url: &str,
+    client: &Client,
+    access_token: &str,
+) -> Result<Value, Box<dyn Error>> {
+    let post_id = url
+        .split("/comments/")
+        .nth(1)
+        .and_then(|s| s.split('/').next())
+        .ok_or("Could not extract Reddit post ID from URL")?;
+
+    let api_url = format!("https://oauth.reddit.com/api/info?id=t3_{}", post_id);
+
+    let json: Value = client
+        .get(&api_url)
+        .bearer_auth(access_token)
+        .header("User-Agent", "MagnusTradingBot")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    Ok(json)
+}
+
+async fn get_reddit_access_token(
+    client: &Client,
+    client_id: &str,
+    client_secret: &str,
+) -> Result<String, Box<dyn Error>> {
+    let response = client
+        .post("https://ssl.reddit.com/api/v1/access_token")
+        .basic_auth(client_id, Some(client_secret))
+        .header("User-Agent", "MagnusTradingBot")
+        .form(&[("grant_type", "client_credentials")])
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?;
+
+    Ok(response.to_string())
+}
+
+// Gets the 100? most recent relevant filings for the given ticker.
+async fn fetch_sec_edgar(ticker: &str, client: &Client) -> Result<Vec<SecFiling>, Box<dyn Error>> {
+    let cik = lookup_sec_cik(ticker, client).await?;
+    let url = format!("https://data.sec.gov/submissions/CIK{}.json", cik);
+
+    let submissions = client
+        .get(&url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<SecSubmissions>()
+        .await?;
+
+    let company_name = submissions.name;
+    let recent = submissions.filings.recent;
+    let canonical_ticker = submissions
+        .tickers
+        .first()
+        .cloned()
+        .unwrap_or_else(|| ticker.to_ascii_uppercase());
+
+    let mut filings = Vec::new();
+
+    for i in 0..recent.forms.len() {
+        let form = recent.forms.get(i).cloned().unwrap_or_default();
+
+        if !is_relevant_form(&form) {
+            continue;
+        }
+
+        let accession_number = recent.accession_numbers.get(i).cloned().unwrap_or_default();
+
+        let primary_document = recent.primary_documents.get(i).cloned().unwrap_or_default();
+
+        if accession_number.is_empty() || primary_document.is_empty() {
+            continue;
+        }
+
+        let accession_no_dashes = accession_number.replace('-', "");
+        let filing_url = format!(
+            "https://www.sec.gov/Archives/edgar/data/{}/{}/{}",
+            cik.trim_start_matches('0'),
+            accession_no_dashes,
+            primary_document
+        );
+
+        let items = recent
+            .items
+            .get(i)
+            .cloned()
+            .filter(|s| !s.trim().is_empty());
+
+        let primary_doc_description = recent
+            .primary_doc_descriptions
+            .get(i)
+            .cloned()
+            .filter(|s| !s.trim().is_empty());
+
+        let acceptance_datetime = recent
+            .acceptance_datetimes
+            .get(i)
+            .cloned()
+            .filter(|s| !s.trim().is_empty());
+
+        let is_inline_xbrl = recent.is_inline_xbrl.get(i).copied().unwrap_or(0) != 0;
+
+        filings.push(SecFiling {
+            ticker: canonical_ticker.clone(),
+            company_name: company_name.clone(),
+            cik: cik.clone(),
+            form,
+            filing_date: recent.filing_dates.get(i).cloned().unwrap_or_default(),
+            acceptance_datetime,
+            accession_number,
+            primary_document,
+            primary_doc_description,
+            items,
+            is_inline_xbrl,
+            filing_url,
+        });
+    }
+
+    Ok(filings)
+}
+
+async fn lookup_sec_cik(
+    ticker: &str,
+    client: &Client,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let ticker_map: Value = client
+        .get("https://www.sec.gov/files/company_tickers.json")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    let wanted = ticker.trim().to_ascii_uppercase();
+
+    let cik = ticker_map
+        .as_object()
+        .ok_or("Invalid SEC ticker map")?
+        .values()
+        .find_map(|entry| {
+            let t = entry.get("ticker")?.as_str()?;
+            if t.eq_ignore_ascii_case(&wanted) {
+                entry.get("cik_str")?.as_u64()
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| format!("Ticker not found: {}", ticker))?;
+
+    Ok(format!("{:010}", cik))
+}
+
+fn is_relevant_form(form: &str) -> bool {
+    return matches!(
+        form,
+        "8-K"
+            | "8-K/A"
+            | "6-K"
+            | "6-K/A"
+            | "10-Q"
+            | "10-Q/A"
+            | "10-K"
+            | "10-K/A"
+            | "S-1"
+            | "S-1/A"
+            | "3"
+            | "4"
+            | "5"
+            | "SC 13D"
+            | "SC 13D/A"
+            | "SC 13G"
+            | "SC 13G/A"
+    );
+}
+
+async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
     let client = Client::builder().user_agent("MagnusTradingBot").build()?;
 
     match () {
-        _ if url.contains("polymarket.com") => fetch_polymarket(url, &client).await,
-        _ if url.contains("kalshi.com") => fetch_kalshi(url, &client).await,
-        _ => Err(std::io::Error::other("Unsupported URL").into()),
+        _ if identifier.contains("reddit.com") => {
+            let reddit_access_token =
+                get_reddit_access_token(&client, "your_client_id", "your_client_secret").await?;
+            Ok(FetchResult::Reddit(
+                fetch_reddit(identifier, &client, &reddit_access_token).await?,
+            ))
+        }
+        _ if identifier.contains("polymarket.com") => Ok(FetchResult::Polymarket(
+            fetch_polymarket(identifier, &client).await?,
+        )),
+        _ if identifier.contains("kalshi.com") => Ok(FetchResult::Kalshi(
+            fetch_kalshi(identifier, &client).await?,
+        )),
+        _ if identifier.len() > 0 && identifier.len() <= 5 => Ok(FetchResult::SecEdgar(
+            fetch_sec_edgar(identifier, &client).await?,
+        )),
+        _ => Err(std::io::Error::other("Unsupported identifier").into()),
     }
 }
 
 #[tokio::main]
 async fn main() {
-    let url = "https://kalshi.com/markets/kxipo/ipos/kxipo-26";
+    let identifier = "https://kalshi.com/markets/kxjensenmention/jensen-mention/kxjensenmention-26mar17";
 
-    match fetch(url).await {
-        Ok(markets) => {
+    match fetch(identifier).await {
+        Ok(FetchResult::Polymarket(markets) | FetchResult::Kalshi(markets)) => {
             if markets.is_empty() {
                 println!("No markets found.");
             } else {
@@ -211,6 +475,33 @@ async fn main() {
                     println!("Question: {}", market.question);
                     println!("Outcomes: {:?}", market.outcomes);
                     println!("Outcome prices: {:?}", market.outcome_prices);
+                }
+            }
+        }
+        Ok(FetchResult::Reddit(json)) => {
+            println!("Reddit post data: {}", json);
+        }
+        Ok(FetchResult::SecEdgar(filings)) => {
+            if filings.is_empty() {
+                println!("No relevant SEC filings found.");
+            } else {
+                for filing in filings {
+                    println!("Ticker: {}", filing.ticker);
+                    println!("Company: {}", filing.company_name);
+                    println!("CIK: {}", filing.cik);
+                    println!("Form: {}", filing.form);
+                    println!("Filing date: {}", filing.filing_date);
+                    println!("Acceptance datetime: {:?}", filing.acceptance_datetime);
+                    println!("Accession number: {}", filing.accession_number);
+                    println!("Primary document: {}", filing.primary_document);
+                    println!(
+                        "Primary doc description: {:?}",
+                        filing.primary_doc_description
+                    );
+                    println!("Items: {:?}", filing.items);
+                    println!("Inline XBRL: {}", filing.is_inline_xbrl);
+                    println!("Filing URL: {}", filing.filing_url);
+                    println!();
                 }
             }
         }
