@@ -1,8 +1,8 @@
 use reqwest::Client;
-use scraper::{Html, Selector};
 use serde::Deserialize;
 use serde_json::Value;
 use std::error::Error;
+use rss::Channel;
 
 #[derive(Debug)]
 struct PolymarketPrediction {
@@ -118,6 +118,9 @@ struct KalshiMarket {
 struct PrNewswireRelease {
     title: String,
     source_section: String,
+    link: Option<String>,
+    pub_date: Option<String>,
+    description: Option<String>,
 }
 
 enum FetchResult {
@@ -469,42 +472,40 @@ fn is_relevant_form(form: &str) -> bool {
     );
 }
 
+// Fetches all recent PR Newswire releases from an RSS feed URL. (20 most recent?)
 async fn fetch_prnewswire(
     client: &Client,
-    url: &str,
+    feed_url: &str,
 ) -> Result<Vec<PrNewswireRelease>, Box<dyn Error>> {
-    let html = client
-        .get(url)
+    let bytes = client
+        .get(feed_url)
         .send()
         .await?
         .error_for_status()?
-        .text()
+        .bytes()
         .await?;
 
-    let document = Html::parse_document(&html);
+    let channel = Channel::read_from(&bytes[..])?;
+    let source_section = channel.title().to_string();
 
-    let link_selector = Selector::parse(r#"a[href^="/news-releases/"][href$=".html"]"#)?;
+    let releases = channel
+        .items()
+        .iter()
+        .filter_map(|item| {
+            let title = item.title()?.trim();
+            if title.is_empty() {
+                return None;
+            }
 
-    let mut releases = Vec::new();
-
-    for link in document.select(&link_selector).take(5) {
-        let title = link
-            .text()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        if title.is_empty() {
-            continue;
-        }
-
-        releases.push(PrNewswireRelease {
-            title,
-            source_section: "financial-services-latest-news".to_string(),
-        });
-    }
+            Some(PrNewswireRelease {
+                title: title.to_string(),
+                source_section: source_section.clone(),
+                link: item.link().map(|s| s.to_string()),
+                pub_date: item.pub_date().map(|s| s.to_string()),
+                description: item.description().map(|s| s.to_string()),
+            })
+        })
+        .collect();
 
     Ok(releases)
 }
@@ -538,7 +539,7 @@ async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
 
 #[tokio::main]
 async fn main() {
-    let identifier = "https://www.prnewswire.com/news-releases/financial-services-latest-news/financial-services-latest-news-list/";
+    let identifier = "https://www.prnewswire.com/rss/news-releases-list.rss";
 
     match fetch(identifier).await {
         Ok(FetchResult::Polymarket(markets)) => {
@@ -600,6 +601,9 @@ async fn main() {
                 for release in releases {
                     println!("Title: {}", release.title);
                     println!("Section: {}", release.source_section);
+                    println!("Published: {:?}", release.pub_date);
+                    println!("Link: {:?}", release.link);
+                    println!("Description: {:?}", release.description);
                     println!();
                 }
             }
