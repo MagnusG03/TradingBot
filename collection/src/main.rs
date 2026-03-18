@@ -1,8 +1,9 @@
+use chrono::Utc;
 use reqwest::Client;
+use rss::{Channel, Item};
 use serde::Deserialize;
 use serde_json::Value;
 use std::error::Error;
-use rss::Channel;
 
 #[derive(Debug)]
 struct PolymarketPrediction {
@@ -123,12 +124,27 @@ struct PrNewswireRelease {
     description: Option<String>,
 }
 
+#[derive(Debug)]
+struct NasdaqTradeHalt {
+    ticker: String,
+    company_name: String,
+    market: String,
+    halt_date: String,
+    halt_time: String,
+    reason: String,
+    resumption_date: Option<String>,
+    resumption_quote_time: Option<String>,
+    resumption_trade_time: Option<String>,
+    pause_threshold_price: Option<String>,
+}
+
 enum FetchResult {
     Polymarket(Vec<PolymarketPrediction>),
     Kalshi(Vec<KalshiPrediction>),
     Reddit(Value),
     SecEdgar(Vec<SecFiling>),
     PrNewswire(Vec<PrNewswireRelease>),
+    NasdaqTradeHalt(Vec<NasdaqTradeHalt>),
 }
 
 // Gets all questions and outcome likelyhoods for the given Polymarket event at this current time. If a specific market is given, only returns data for that market.
@@ -510,6 +526,59 @@ async fn fetch_prnewswire(
     Ok(releases)
 }
 
+// Fetches todays most recent NASDAQ trade halts from the NASDAQ RSS feed URL.
+async fn fetch_nasdaq_trade_halt(
+    client: &Client,
+    feed_url: &str,
+) -> Result<Vec<NasdaqTradeHalt>, Box<dyn Error>> {
+    let bytes = client
+        .get(feed_url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+
+    let channel = Channel::read_from(&bytes[..])?;
+
+    let today = Utc::now().format("%m/%d/%Y").to_string();
+
+    let halts = channel
+        .items()
+        .iter()
+        .filter_map(|item| {
+            let halt_date = get_ndaq_field(item, "HaltDate")?;
+
+            if halt_date != today {
+                return None;
+            }
+
+            Some(NasdaqTradeHalt {
+                ticker: get_ndaq_field(item, "IssueSymbol")?,
+                company_name: get_ndaq_field(item, "IssueName")?,
+                market: get_ndaq_field(item, "Market")?,
+                halt_date,
+                halt_time: get_ndaq_field(item, "HaltTime")?,
+                reason: get_ndaq_field(item, "ReasonCode")?,
+                resumption_date: get_ndaq_field(item, "ResumptionDate"),
+                resumption_quote_time: get_ndaq_field(item, "ResumptionQuoteTime"),
+                resumption_trade_time: get_ndaq_field(item, "ResumptionTradeTime"),
+                pause_threshold_price: get_ndaq_field(item, "PauseThresholdPrice"),
+            })
+        })
+        .collect();
+
+    Ok(halts)
+}
+
+fn get_ndaq_field(item: &Item, field: &str) -> Option<String> {
+    item.extensions()
+        .get("ndaq")
+        .and_then(|fields| fields.get(field))
+        .and_then(|values| values.first())
+        .and_then(|ext| ext.value.clone())
+}
+
 async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
     let client = Client::builder().user_agent("MagnusTradingBot").build()?;
 
@@ -533,13 +602,16 @@ async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
         _ if identifier.contains("prnewswire.com") => Ok(FetchResult::PrNewswire(
             fetch_prnewswire(&client, identifier).await?,
         )),
+        _ if identifier.contains("nasdaqtrader.com") => Ok(FetchResult::NasdaqTradeHalt(
+            fetch_nasdaq_trade_halt(&client, identifier).await?,
+        )),
         _ => Err(std::io::Error::other("Unsupported identifier").into()),
     }
 }
 
 #[tokio::main]
 async fn main() {
-    let identifier = "https://www.prnewswire.com/rss/news-releases-list.rss";
+    let identifier = "https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts";
 
     match fetch(identifier).await {
         Ok(FetchResult::Polymarket(markets)) => {
@@ -604,6 +676,25 @@ async fn main() {
                     println!("Published: {:?}", release.pub_date);
                     println!("Link: {:?}", release.link);
                     println!("Description: {:?}", release.description);
+                    println!();
+                }
+            }
+        }
+        Ok(FetchResult::NasdaqTradeHalt(halts)) => {
+            if halts.is_empty() {
+                println!("No NASDAQ trade halts found.");
+            } else {
+                for halt in halts {
+                    println!("Ticker: {}", halt.ticker);
+                    println!("Company: {}", halt.company_name);
+                    println!("Market: {}", halt.market);
+                    println!("Halt date: {}", halt.halt_date);
+                    println!("Halt time: {}", halt.halt_time);
+                    println!("Reason: {}", halt.reason);
+                    println!("Resumption date: {:?}", halt.resumption_date);
+                    println!("Resumption quote time: {:?}", halt.resumption_quote_time);
+                    println!("Resumption trade time: {:?}", halt.resumption_trade_time);
+                    println!("Pause threshold price: {:?}", halt.pause_threshold_price);
                     println!();
                 }
             }
