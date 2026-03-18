@@ -1,4 +1,5 @@
 use reqwest::Client;
+use scraper::{Html, Selector};
 use serde::Deserialize;
 use serde_json::Value;
 use std::error::Error;
@@ -113,11 +114,18 @@ struct KalshiMarket {
     last_price_dollars: Option<String>,
 }
 
+#[derive(Debug)]
+struct PrNewswireRelease {
+    title: String,
+    source_section: String,
+}
+
 enum FetchResult {
     Polymarket(Vec<PolymarketPrediction>),
     Kalshi(Vec<KalshiPrediction>),
     Reddit(Value),
     SecEdgar(Vec<SecFiling>),
+    PrNewswire(Vec<PrNewswireRelease>),
 }
 
 // Gets all questions and outcome likelyhoods for the given Polymarket event at this current time. If a specific market is given, only returns data for that market.
@@ -461,6 +469,46 @@ fn is_relevant_form(form: &str) -> bool {
     );
 }
 
+async fn fetch_prnewswire(
+    client: &Client,
+    url: &str,
+) -> Result<Vec<PrNewswireRelease>, Box<dyn Error>> {
+    let html = client
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+
+    let document = Html::parse_document(&html);
+
+    let link_selector = Selector::parse(r#"a[href^="/news-releases/"][href$=".html"]"#)?;
+
+    let mut releases = Vec::new();
+
+    for link in document.select(&link_selector).take(5) {
+        let title = link
+            .text()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        if title.is_empty() {
+            continue;
+        }
+
+        releases.push(PrNewswireRelease {
+            title,
+            source_section: "financial-services-latest-news".to_string(),
+        });
+    }
+
+    Ok(releases)
+}
+
 async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
     let client = Client::builder().user_agent("MagnusTradingBot").build()?;
 
@@ -481,13 +529,16 @@ async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
         _ if identifier.len() > 0 && identifier.len() <= 5 => Ok(FetchResult::SecEdgar(
             fetch_sec_edgar(identifier, &client).await?,
         )),
+        _ if identifier.contains("prnewswire.com") => Ok(FetchResult::PrNewswire(
+            fetch_prnewswire(&client, identifier).await?,
+        )),
         _ => Err(std::io::Error::other("Unsupported identifier").into()),
     }
 }
 
 #[tokio::main]
 async fn main() {
-    let identifier = "https://polymarket.com/event/2026-ncaa-tournament-winner";
+    let identifier = "https://www.prnewswire.com/news-releases/financial-services-latest-news/financial-services-latest-news-list/";
 
     match fetch(identifier).await {
         Ok(FetchResult::Polymarket(markets)) => {
@@ -538,6 +589,17 @@ async fn main() {
                     println!("Items: {:?}", filing.items);
                     println!("Inline XBRL: {}", filing.is_inline_xbrl);
                     println!("Filing URL: {}", filing.filing_url);
+                    println!();
+                }
+            }
+        }
+        Ok(FetchResult::PrNewswire(releases)) => {
+            if releases.is_empty() {
+                println!("No PR Newswire releases found.");
+            } else {
+                for release in releases {
+                    println!("Title: {}", release.title);
+                    println!("Section: {}", release.source_section);
                     println!();
                 }
             }
