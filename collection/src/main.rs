@@ -126,6 +126,16 @@ struct PrNewswireRelease {
 }
 
 #[derive(Debug)]
+struct GlobeNewswireRelease {
+    feed_name: String,
+    title: String,
+    link: String,
+    pub_date: Option<String>,
+    description: Option<String>,
+    categories: Vec<String>,
+}
+
+#[derive(Debug)]
 struct NasdaqTradeHalt {
     ticker: String,
     company_name: String,
@@ -145,6 +155,7 @@ enum FetchResult {
     Reddit(Value),
     SecEdgar(Vec<SecFiling>),
     PrNewswire(Vec<PrNewswireRelease>),
+    GlobeNewswire(Vec<GlobeNewswireRelease>),
     NasdaqTradeHalt(Vec<NasdaqTradeHalt>),
 }
 
@@ -525,6 +536,50 @@ async fn fetch_prnewswire(
     Ok(releases)
 }
 
+// Fetches 20 most recent GlobeNewswire releases from RSS.
+async fn fetch_globenewswire(
+    client: &Client,
+    feed_url: &str,
+) -> Result<Vec<GlobeNewswireRelease>, Box<dyn Error>> {
+    let bytes = client
+        .get(feed_url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+
+    let channel = Channel::read_from(&bytes[..])?;
+    let feed_name = channel.title().trim().to_string();
+
+    let releases = channel
+        .items()
+        .iter()
+        .filter_map(|item| {
+            let title = item.title()?.trim();
+            if title.is_empty() {
+                return None;
+            }
+
+            Some(GlobeNewswireRelease {
+                feed_name: feed_name.clone(),
+                title: title.to_string(),
+                link: item.link().unwrap_or_default().trim().to_string(),
+                pub_date: item.pub_date().map(|s| s.to_string()),
+                description: item.description().map(|s| s.to_string()),
+                categories: item
+                    .categories()
+                    .iter()
+                    .map(|category| category.name().trim().to_string())
+                    .filter(|category| !category.is_empty())
+                    .collect(),
+            })
+        })
+        .collect();
+
+    Ok(releases)
+}
+
 // Fetches todays most recent NASDAQ trade halts from the NASDAQ RSS feed URL.
 async fn fetch_nasdaq_trade_halt(
     client: &Client,
@@ -604,13 +659,16 @@ async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
         _ if identifier.contains("nasdaqtrader.com") => Ok(FetchResult::NasdaqTradeHalt(
             fetch_nasdaq_trade_halt(&client, identifier).await?,
         )),
+        _ if identifier.contains("globenewswire.com") => Ok(FetchResult::GlobeNewswire(
+            fetch_globenewswire(&client, identifier).await?,
+        )),
         _ => Err(std::io::Error::other("Unsupported identifier").into()),
     }
 }
 
 #[tokio::main]
 async fn main() {
-    let identifier = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&count=100&output=atom";
+    let identifier = "https://www.globenewswire.com/RssFeed/orgclass/1/feedTitle/GlobeNewswire%20-%20News%20about%20Public%20Companies";
 
     match fetch(identifier).await {
         Ok(FetchResult::Polymarket(markets)) => {
@@ -694,6 +752,21 @@ async fn main() {
                     println!("Resumption quote time: {:?}", halt.resumption_quote_time);
                     println!("Resumption trade time: {:?}", halt.resumption_trade_time);
                     println!("Pause threshold price: {:?}", halt.pause_threshold_price);
+                    println!();
+                }
+            }
+        }
+        Ok(FetchResult::GlobeNewswire(releases)) => {
+            if releases.is_empty() {
+                println!("No GlobeNewswire releases found.");
+            } else {
+                for release in releases {
+                    println!("Title: {}", release.title);
+                    println!("Feed: {}", release.feed_name);
+                    println!("Published: {:?}", release.pub_date);
+                    println!("Link: {}", release.link);
+                    println!("Description: {:?}", release.description);
+                    println!("Categories: {:?}", release.categories);
                     println!();
                 }
             }
