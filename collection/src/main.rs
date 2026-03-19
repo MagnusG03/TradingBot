@@ -4,6 +4,7 @@ use rss::{Channel, Item};
 use serde::Deserialize;
 use serde_json::Value;
 use std::error::Error;
+use atom_syndication::Feed;
 
 #[derive(Debug)]
 struct PolymarketPrediction {
@@ -349,95 +350,17 @@ async fn get_reddit_access_token(
     Ok(response.to_string())
 }
 
-// Gets the 100? most recent relevant filings for the given ticker.
-async fn fetch_sec_edgar(ticker: &str, client: &Client) -> Result<Vec<SecFiling>, Box<dyn Error>> {
-    let cik = lookup_sec_cik(ticker, client).await?;
-    let url = format!("https://data.sec.gov/submissions/CIK{}.json", cik);
+// Fetches the most recent relevant SEC filings (returns like 24? most recent filings).
+async fn fetch_sec_edgar(identifier: &str, client: &Client) -> Result<Vec<SecFiling>, Box<dyn Error>> {
+    let feed_url = if identifier.contains("sec.gov") {
+        identifier.to_string()
+    } else {
+        format!(
+            "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={}&owner=exclude&count=100&output=atom",
+            identifier.trim()
+        )
+    };
 
-    let submissions = client
-        .get(&url)
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<SecSubmissions>()
-        .await?;
-
-    let company_name = submissions.name;
-    let recent = submissions.filings.recent;
-    let canonical_ticker = submissions
-        .tickers
-        .first()
-        .cloned()
-        .unwrap_or_else(|| ticker.to_ascii_uppercase());
-
-    let mut filings = Vec::new();
-
-    for i in 0..recent.forms.len() {
-        let form = recent.forms.get(i).cloned().unwrap_or_default();
-
-        if !is_relevant_form(&form) {
-            continue;
-        }
-
-        let accession_number = recent.accession_numbers.get(i).cloned().unwrap_or_default();
-
-        let primary_document = recent.primary_documents.get(i).cloned().unwrap_or_default();
-
-        if accession_number.is_empty() || primary_document.is_empty() {
-            continue;
-        }
-
-        let accession_no_dashes = accession_number.replace('-', "");
-        let filing_url = format!(
-            "https://www.sec.gov/Archives/edgar/data/{}/{}/{}",
-            cik.trim_start_matches('0'),
-            accession_no_dashes,
-            primary_document
-        );
-
-        let items = recent
-            .items
-            .get(i)
-            .cloned()
-            .filter(|s| !s.trim().is_empty());
-
-        let primary_doc_description = recent
-            .primary_doc_descriptions
-            .get(i)
-            .cloned()
-            .filter(|s| !s.trim().is_empty());
-
-        let acceptance_datetime = recent
-            .acceptance_datetimes
-            .get(i)
-            .cloned()
-            .filter(|s| !s.trim().is_empty());
-
-        let is_inline_xbrl = recent.is_inline_xbrl.get(i).copied().unwrap_or(0) != 0;
-
-        filings.push(SecFiling {
-            ticker: canonical_ticker.clone(),
-            company_name: company_name.clone(),
-            cik: cik.clone(),
-            form,
-            filing_date: recent.filing_dates.get(i).cloned().unwrap_or_default(),
-            acceptance_datetime,
-            accession_number,
-            primary_document,
-            primary_doc_description,
-            items,
-            is_inline_xbrl,
-            filing_url,
-        });
-    }
-
-    Ok(filings)
-}
-
-async fn lookup_sec_cik(
-    ticker: &str,
-    client: &Client,
-) -> Result<String, Box<dyn std::error::Error>> {
     let ticker_map: Value = client
         .get("https://www.sec.gov/files/company_tickers.json")
         .send()
@@ -446,23 +369,99 @@ async fn lookup_sec_cik(
         .json()
         .await?;
 
-    let wanted = ticker.trim().to_ascii_uppercase();
+    let mut cik_to_ticker = std::collections::HashMap::new();
 
-    let cik = ticker_map
-        .as_object()
-        .ok_or("Invalid SEC ticker map")?
-        .values()
-        .find_map(|entry| {
-            let t = entry.get("ticker")?.as_str()?;
-            if t.eq_ignore_ascii_case(&wanted) {
-                entry.get("cik_str")?.as_u64()
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| format!("Ticker not found: {}", ticker))?;
+    if let Some(entries) = ticker_map.as_object() {
+        for entry in entries.values() {
+            let Some(cik_num) = entry.get("cik_str").and_then(|v| v.as_u64()) else {
+                continue;
+            };
+            let Some(ticker) = entry.get("ticker").and_then(|v| v.as_str()) else {
+                continue;
+            };
 
-    Ok(format!("{:010}", cik))
+            cik_to_ticker.insert(format!("{:010}", cik_num), ticker.to_string());
+        }
+    }
+
+    let bytes = client
+        .get(&feed_url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
+
+    let feed = Feed::read_from(&bytes[..])?;
+    let mut filings = Vec::new();
+
+    for entry in feed.entries() {
+        let title = entry.title().to_string();
+
+        let Some((form, rest)) = title.split_once(" - ") else {
+            continue;
+        };
+
+        if !is_relevant_form(form.trim()) {
+            continue;
+        }
+
+        let Some(company_start) = rest.find(" (") else {
+            continue;
+        };
+
+        let company_name = rest[..company_start].trim().to_string();
+        let after_company = &rest[company_start + 2..];
+
+        let Some(cik_end) = after_company.find(')') else {
+            continue;
+        };
+
+        let cik = after_company[..cik_end].trim().to_string();
+
+        let filing_url = entry
+            .links()
+            .first()
+            .map(|link| link.href().to_string())
+            .unwrap_or_default();
+
+        let accession_number = filing_url
+            .split('/')
+            .find(|part| part.len() == 18 && part.chars().all(|c| c.is_ascii_digit()))
+            .map(|s| format!("{}-{}-{}", &s[0..10], &s[10..12], &s[12..18]))
+            .unwrap_or_default();
+
+        let primary_document = filing_url
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .to_string();
+
+        let filing_date = entry.updated().date_naive().to_string();
+        let acceptance_datetime = Some(entry.updated().to_rfc3339());
+
+        let primary_doc_description = entry
+            .summary()
+            .map(|s| s.value.to_string())
+            .filter(|s| !s.trim().is_empty());
+
+        filings.push(SecFiling {
+            ticker: cik_to_ticker.get(&cik).cloned().unwrap_or_default(),
+            company_name,
+            cik,
+            form: form.trim().to_string(),
+            filing_date,
+            acceptance_datetime,
+            accession_number,
+            primary_document,
+            primary_doc_description,
+            items: None,
+            is_inline_xbrl: false,
+            filing_url,
+        });
+    }
+
+    Ok(filings)
 }
 
 fn is_relevant_form(form: &str) -> bool {
@@ -596,7 +595,7 @@ async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
         _ if identifier.contains("kalshi.com") => Ok(FetchResult::Kalshi(
             fetch_kalshi(identifier, &client).await?,
         )),
-        _ if identifier.len() > 0 && identifier.len() <= 5 => Ok(FetchResult::SecEdgar(
+        _ if identifier.contains("sec.gov") || (identifier.len() > 0 && identifier.len() <= 5) => Ok(FetchResult::SecEdgar(
             fetch_sec_edgar(identifier, &client).await?,
         )),
         _ if identifier.contains("prnewswire.com") => Ok(FetchResult::PrNewswire(
@@ -611,7 +610,7 @@ async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
 
 #[tokio::main]
 async fn main() {
-    let identifier = "https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts";
+    let identifier = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&count=100&output=atom";
 
     match fetch(identifier).await {
         Ok(FetchResult::Polymarket(markets)) => {

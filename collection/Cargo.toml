@@ -11,3 +11,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rss = "2"
 chrono = "0.4.44"
+atom_syndication = "0.12.7"
