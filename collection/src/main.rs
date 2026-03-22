@@ -1,17 +1,17 @@
+use atom_syndication::Feed;
 use chrono::Utc;
 use reqwest::{
-    header::{
-        HeaderMap, HeaderValue, ACCEPT, ACCEPT_LANGUAGE, CACHE_CONTROL,
-        CONNECTION, UPGRADE_INSECURE_REQUESTS, USER_AGENT,
-    },
     Client,
+    header::{
+        ACCEPT, ACCEPT_LANGUAGE, CACHE_CONTROL, CONNECTION, HeaderMap, HeaderValue,
+        UPGRADE_INSECURE_REQUESTS, USER_AGENT,
+    },
 };
 use rss::{Channel, Item};
 use scraper::Html;
 use serde::Deserialize;
 use serde_json::Value;
 use std::error::Error;
-use atom_syndication::Feed;
 
 #[derive(Debug)]
 struct PolymarketPrediction {
@@ -182,25 +182,19 @@ fn build_client() -> Result<Client, Box<dyn std::error::Error>> {
         USER_AGENT,
         HeaderValue::from_static(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-             (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+             (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
         ),
     );
     headers.insert(
         ACCEPT,
         HeaderValue::from_static(
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         ),
     );
-    headers.insert(
-        ACCEPT_LANGUAGE,
-        HeaderValue::from_static("en-US,en;q=0.9"),
-    );
+    headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     headers.insert(CONNECTION, HeaderValue::from_static("keep-alive"));
-    headers.insert(
-        UPGRADE_INSECURE_REQUESTS,
-        HeaderValue::from_static("1"),
-    );
+    headers.insert(UPGRADE_INSECURE_REQUESTS, HeaderValue::from_static("1"));
 
     let client = Client::builder()
         .default_headers(headers)
@@ -416,7 +410,10 @@ async fn get_reddit_access_token(
 }
 
 // Fetches the most recent relevant SEC filings (returns like 24? most recent filings).
-async fn fetch_sec_edgar_all(identifier: &str, client: &Client) -> Result<Vec<SecFiling>, Box<dyn Error>> {
+async fn fetch_sec_edgar_all(
+    identifier: &str,
+    client: &Client,
+) -> Result<Vec<SecFiling>, Box<dyn Error>> {
     let feed_url = if identifier.contains("sec.gov") {
         identifier.to_string()
     } else {
@@ -496,11 +493,7 @@ async fn fetch_sec_edgar_all(identifier: &str, client: &Client) -> Result<Vec<Se
             .map(|s| format!("{}-{}-{}", &s[0..10], &s[10..12], &s[12..18]))
             .unwrap_or_default();
 
-        let primary_document = filing_url
-            .rsplit('/')
-            .next()
-            .unwrap_or("")
-            .to_string();
+        let primary_document = filing_url.rsplit('/').next().unwrap_or("").to_string();
 
         let filing_date = entry.updated().date_naive().to_string();
         let acceptance_datetime = Some(entry.updated().to_rfc3339());
@@ -530,7 +523,10 @@ async fn fetch_sec_edgar_all(identifier: &str, client: &Client) -> Result<Vec<Se
 }
 
 // Gets the 100? most recent relevant filings for the given ticker.
-async fn fetch_sec_edgar_ticker(ticker: &str, client: &Client) -> Result<Vec<SecFiling>, Box<dyn Error>> {
+async fn fetch_sec_edgar_ticker(
+    ticker: &str,
+    client: &Client,
+) -> Result<Vec<SecFiling>, Box<dyn Error>> {
     let cik = lookup_sec_cik(ticker, client).await?;
     let url = format!("https://data.sec.gov/submissions/CIK{}.json", cik);
 
@@ -871,9 +867,11 @@ async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
         _ if identifier.contains("kalshi.com") => Ok(FetchResult::Kalshi(
             fetch_kalshi(identifier, &client).await?,
         )),
-        _ if identifier.contains("sec.gov") || (identifier.len() > 0 && identifier.len() <= 5) => Ok(FetchResult::SecEdgar(
-            fetch_sec_edgar_all(identifier, &client).await?,
-        )),
+        _ if identifier.contains("sec.gov") || (identifier.len() > 0 && identifier.len() <= 5) => {
+            Ok(FetchResult::SecEdgar(
+                fetch_sec_edgar_all(identifier, &client).await?,
+            ))
+        }
         _ if identifier.contains("prnewswire.com") => Ok(FetchResult::PrNewswire(
             fetch_prnewswire(&client, identifier).await?,
         )),
@@ -891,16 +889,163 @@ async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
 }
 
 async fn sentiment_analysis(string: &str) -> f64 {
-    0.0
+    fn tokenize(input: &str) -> Vec<String> {
+        input
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|token| !token.is_empty())
+            .map(|token| token.to_ascii_lowercase())
+            .collect()
+    }
+
+    fn word_score(token: &str) -> Option<f64> {
+        Some(match token {
+            "acquire" | "acquires" | "acquired" | "buy" | "buys" | "bought" | "bullish"
+            | "collaboration" | "growth" | "improve" | "improves" | "improved" | "innovation"
+            | "innovative" | "opportunity" | "outperform" | "outperformed" | "praise"
+            | "praises" | "praised" | "rebound" | "revenue" | "strong" | "surge" | "surges"
+            | "surged" | "win" | "wins" | "won" => 1.0,
+            "best" | "beat" | "beats" | "boost" | "boosts" | "jump" | "jumps" | "jumped"
+            | "lift" | "lifts" | "lifted" | "largest" | "gain" | "gains" | "gained" | "up" => 0.7,
+            "concern" | "concerns" | "cut" | "cuts" | "cutting" | "decrease" | "decreases"
+            | "decreased" | "downgrade" | "downgrades" | "downgraded" | "drop" | "drops"
+            | "dropped" | "exposure" | "fall" | "falls" | "fell" | "leak" | "leaks" | "miss"
+            | "misses" | "missed" | "pressure" | "regulatory" | "risk" | "risks" | "sell"
+            | "sells" | "sold" | "weak" => -1.0,
+            "lawsuit" | "lawsuits" | "probe" | "probes" | "scandal" | "slump" | "slumps"
+            | "warning" | "warnings" => -1.4,
+            _ => return None,
+        })
+    }
+
+    fn phrase_score(tokens: &[String], index: usize) -> Option<(usize, f64)> {
+        const PHRASES: &[(&[&str], f64)] = &[
+            (&["beat", "expectations"], 1.6),
+            (&["beats", "expectations"], 1.6),
+            (&["cut", "exposure"], -1.6),
+            (&["fee", "cut"], -0.5),
+            (&["legal", "win"], 1.7),
+            (&["miss", "expectations"], -1.6),
+            (&["misses", "expectations"], -1.6),
+            (&["price", "target", "raised"], 1.5),
+            (&["price", "target", "cut"], -1.5),
+            (&["raised", "guidance"], 1.7),
+            (&["regulatory", "pressure"], -1.7),
+            (&["sales", "surge"], 1.8),
+            (&["shares", "bought"], 0.8),
+            (&["shares", "sold"], -0.8),
+            (&["stock", "jumps"], 1.8),
+            (&["stock", "position", "raised"], 0.9),
+            (&["stock", "holdings", "lifted"], 0.9),
+        ];
+
+        PHRASES
+            .iter()
+            .filter(|(phrase, _)| index + phrase.len() <= tokens.len())
+            .filter(|(phrase, _)| {
+                phrase
+                    .iter()
+                    .enumerate()
+                    .all(|(offset, token)| tokens[index + offset] == *token)
+            })
+            .max_by_key(|(phrase, _)| phrase.len())
+            .map(|(phrase, score)| (phrase.len(), *score))
+    }
+
+    fn is_negation(token: &str) -> bool {
+        matches!(
+            token,
+            "no" | "not" | "never" | "none" | "without" | "hardly"
+        )
+    }
+
+    fn intensity(token: &str) -> f64 {
+        match token {
+            "deeply" | "extremely" | "highly" | "sharply" | "strongly" => 1.35,
+            "very" => 1.2,
+            "slightly" => 0.75,
+            _ => 1.0,
+        }
+    }
+
+    let tokens = tokenize(string);
+
+    if tokens.is_empty() {
+        return 0.0;
+    }
+
+    let mut total_score = 0.0;
+    let mut matched_terms = 0.0;
+    let mut index = 0;
+
+    while index < tokens.len() {
+        if let Some((phrase_len, score)) = phrase_score(&tokens, index) {
+            total_score += score;
+            matched_terms += 1.0;
+            index += phrase_len;
+            continue;
+        }
+
+        if let Some(mut score) = word_score(&tokens[index]) {
+            if index > 0 {
+                score *= intensity(&tokens[index - 1]);
+            }
+
+            let negated = tokens[index.saturating_sub(3)..index]
+                .iter()
+                .any(|token| is_negation(token));
+            if negated {
+                score *= -0.8;
+            }
+
+            total_score += score;
+            matched_terms += 1.0;
+        }
+
+        index += 1;
+    }
+
+    if matched_terms == 0.0 {
+        return 0.0;
+    }
+
+    (total_score / matched_terms).clamp(-1.0, 1.0)
 }
 
-async fn dispatcher() {
+#[cfg(test)]
+mod tests {
+    use super::sentiment_analysis;
 
+    #[tokio::test]
+    async fn positive_financial_headline_scores_above_zero() {
+        let score = sentiment_analysis(
+            "Apple CEO visits China as iPhone sales surge and the company emphasizes innovation",
+        )
+        .await;
+
+        assert!(score > 0.4, "expected positive score, got {score}");
+    }
+
+    #[tokio::test]
+    async fn negative_financial_headline_scores_below_zero() {
+        let score = sentiment_analysis(
+            "Analyst downgrades AAPL after leak spotlights wearable risk and regulatory pressure",
+        )
+        .await;
+
+        assert!(score < -0.4, "expected negative score, got {score}");
+    }
+
+    #[tokio::test]
+    async fn unknown_text_stays_neutral() {
+        let score = sentiment_analysis("Apple discussed several topics during a meeting").await;
+
+        assert_eq!(score, 0.0);
+    }
 }
 
-async fn storer(fetch_result: FetchResult) {
+async fn dispatcher() {}
 
-}
+async fn storer(_fetch_result: FetchResult) {}
 
 #[tokio::main]
 async fn main() {
@@ -1016,6 +1161,10 @@ async fn main() {
                     println!("Published: {:?}", article.pub_date);
                     println!("Link: {}", article.link);
                     println!("Description: {:?}", article.description);
+                    println!(
+                        "Sentiment score: {:.2}",
+                        sentiment_analysis(&article.description.clone().unwrap_or_default()).await
+                    );
                     println!();
                 }
             }
