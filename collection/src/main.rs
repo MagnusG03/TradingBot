@@ -172,7 +172,7 @@ enum FetchResult {
     PrNewswire(Vec<PrNewswireRelease>),
     GlobeNewswire(Vec<GlobeNewswireRelease>),
     NasdaqTradeHalt(Vec<NasdaqTradeHalt>),
-    GoogleNews(GoogleArticle),
+    GoogleNews(Vec<GoogleArticle>),
 }
 
 fn build_client() -> Result<Client, Box<dyn std::error::Error>> {
@@ -416,7 +416,7 @@ async fn get_reddit_access_token(
 }
 
 // Fetches the most recent relevant SEC filings (returns like 24? most recent filings).
-async fn fetch_sec_edgar(identifier: &str, client: &Client) -> Result<Vec<SecFiling>, Box<dyn Error>> {
+async fn fetch_sec_edgar_all(identifier: &str, client: &Client) -> Result<Vec<SecFiling>, Box<dyn Error>> {
     let feed_url = if identifier.contains("sec.gov") {
         identifier.to_string()
     } else {
@@ -527,6 +527,122 @@ async fn fetch_sec_edgar(identifier: &str, client: &Client) -> Result<Vec<SecFil
     }
 
     Ok(filings)
+}
+
+// Gets the 100? most recent relevant filings for the given ticker.
+async fn fetch_sec_edgar_ticker(ticker: &str, client: &Client) -> Result<Vec<SecFiling>, Box<dyn Error>> {
+    let cik = lookup_sec_cik(ticker, client).await?;
+    let url = format!("https://data.sec.gov/submissions/CIK{}.json", cik);
+
+    let submissions = client
+        .get(&url)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<SecSubmissions>()
+        .await?;
+
+    let company_name = submissions.name;
+    let recent = submissions.filings.recent;
+    let canonical_ticker = submissions
+        .tickers
+        .first()
+        .cloned()
+        .unwrap_or_else(|| ticker.to_ascii_uppercase());
+
+    let mut filings = Vec::new();
+
+    for i in 0..recent.forms.len() {
+        let form = recent.forms.get(i).cloned().unwrap_or_default();
+
+        if !is_relevant_form(&form) {
+            continue;
+        }
+
+        let accession_number = recent.accession_numbers.get(i).cloned().unwrap_or_default();
+
+        let primary_document = recent.primary_documents.get(i).cloned().unwrap_or_default();
+
+        if accession_number.is_empty() || primary_document.is_empty() {
+            continue;
+        }
+
+        let accession_no_dashes = accession_number.replace('-', "");
+        let filing_url = format!(
+            "https://www.sec.gov/Archives/edgar/data/{}/{}/{}",
+            cik.trim_start_matches('0'),
+            accession_no_dashes,
+            primary_document
+        );
+
+        let items = recent
+            .items
+            .get(i)
+            .cloned()
+            .filter(|s| !s.trim().is_empty());
+
+        let primary_doc_description = recent
+            .primary_doc_descriptions
+            .get(i)
+            .cloned()
+            .filter(|s| !s.trim().is_empty());
+
+        let acceptance_datetime = recent
+            .acceptance_datetimes
+            .get(i)
+            .cloned()
+            .filter(|s| !s.trim().is_empty());
+
+        let is_inline_xbrl = recent.is_inline_xbrl.get(i).copied().unwrap_or(0) != 0;
+
+        filings.push(SecFiling {
+            ticker: canonical_ticker.clone(),
+            company_name: company_name.clone(),
+            cik: cik.clone(),
+            form,
+            filing_date: recent.filing_dates.get(i).cloned().unwrap_or_default(),
+            acceptance_datetime,
+            accession_number,
+            primary_document,
+            primary_doc_description,
+            items,
+            is_inline_xbrl,
+            filing_url,
+        });
+    }
+
+    Ok(filings)
+}
+
+async fn lookup_sec_cik(
+    ticker: &str,
+    client: &Client,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let ticker_map: Value = client
+        .get("https://www.sec.gov/files/company_tickers.json")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    let wanted = ticker.trim().to_ascii_uppercase();
+
+    let cik = ticker_map
+        .as_object()
+        .ok_or("Invalid SEC ticker map")?
+        .values()
+        .find_map(|entry| {
+            let t = entry.get("ticker")?.as_str()?;
+            if t.eq_ignore_ascii_case(&wanted) {
+                entry.get("cik_str")?.as_u64()
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| format!("Ticker not found: {}", ticker))?;
+
+    Ok(format!("{:010}", cik))
 }
 
 fn is_relevant_form(form: &str) -> bool {
@@ -687,7 +803,11 @@ fn get_ndaq_field(item: &Item, field: &str) -> Option<String> {
         .and_then(|ext| ext.value.clone())
 }
 
-async fn fetch_google_news(url: &str, client: &Client) -> Result<GoogleArticle, Box<dyn Error>> {
+// Fetches all Google News articles from the given RSS feed URL. (max 100 most recent)
+async fn fetch_google_news(
+    url: &str,
+    client: &Client,
+) -> Result<Vec<GoogleArticle>, Box<dyn Error>> {
     let bytes = client
         .get(url)
         .header("Referer", "https://news.google.com/")
@@ -698,29 +818,40 @@ async fn fetch_google_news(url: &str, client: &Client) -> Result<GoogleArticle, 
         .await?;
 
     let channel = Channel::read_from(&bytes[..])?;
-    let item = channel
+    let articles: Vec<GoogleArticle> = channel
         .items()
         .iter()
-        .find(|item| item.title().is_some_and(|title| !title.trim().is_empty()))
-        .ok_or_else(|| std::io::Error::other("No Google News stories found"))?;
+        .filter_map(|item| {
+            let title = item.title()?.trim();
+            if title.is_empty() {
+                return None;
+            }
 
-    Ok(GoogleArticle {
-        title: item.title().unwrap_or_default().trim().to_string(),
-        link: item.link().unwrap_or(url).trim().to_string(),
-        pub_date: item.pub_date().map(|value| value.trim().to_string()),
-        description: item
-            .description()
-            .map(|value| {
-                Html::parse_fragment(value)
-                    .root_element()
-                    .text()
-                    .collect::<String>()
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
+            Some(GoogleArticle {
+                title: title.to_string(),
+                link: item.link().unwrap_or(url).trim().to_string(),
+                pub_date: item.pub_date().map(|value| value.trim().to_string()),
+                description: item
+                    .description()
+                    .map(|value| {
+                        Html::parse_fragment(value)
+                            .root_element()
+                            .text()
+                            .collect::<String>()
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .filter(|value| !value.is_empty()),
             })
-            .filter(|value| !value.is_empty()),
-    })
+        })
+        .collect();
+
+    if articles.is_empty() {
+        return Err(std::io::Error::other("No Google News stories found").into());
+    }
+
+    Ok(articles)
 }
 
 async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
@@ -741,7 +872,7 @@ async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
             fetch_kalshi(identifier, &client).await?,
         )),
         _ if identifier.contains("sec.gov") || (identifier.len() > 0 && identifier.len() <= 5) => Ok(FetchResult::SecEdgar(
-            fetch_sec_edgar(identifier, &client).await?,
+            fetch_sec_edgar_all(identifier, &client).await?,
         )),
         _ if identifier.contains("prnewswire.com") => Ok(FetchResult::PrNewswire(
             fetch_prnewswire(&client, identifier).await?,
@@ -759,9 +890,21 @@ async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
     }
 }
 
+async fn sentiment_analysis(string: &str) -> f64 {
+    0.0
+}
+
+async fn dispatcher() {
+
+}
+
+async fn storer(fetch_result: FetchResult) {
+
+}
+
 #[tokio::main]
 async fn main() {
-    let identifier = "https://news.google.com/rss";
+    let identifier = "https://news.google.com/rss/search?q=AAPL+when:1d&hl=en-US&gl=US&ceid=US:en";
 
     match fetch(identifier).await {
         Ok(FetchResult::Polymarket(markets)) => {
@@ -864,11 +1007,18 @@ async fn main() {
                 }
             }
         }
-        Ok(FetchResult::GoogleNews(article)) => {
-            println!("Title: {}", article.title);
-            println!("Published: {:?}", article.pub_date);
-            println!("Link: {}", article.link);
-            println!("Description: {:?}", article.description);
+        Ok(FetchResult::GoogleNews(articles)) => {
+            if articles.is_empty() {
+                println!("No Google News articles found.");
+            } else {
+                for article in articles {
+                    println!("Title: {}", article.title);
+                    println!("Published: {:?}", article.pub_date);
+                    println!("Link: {}", article.link);
+                    println!("Description: {:?}", article.description);
+                    println!();
+                }
+            }
         }
         Err(e) => eprintln!("Error fetching market: {}", e),
     }
