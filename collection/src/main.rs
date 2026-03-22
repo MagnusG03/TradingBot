@@ -1,6 +1,13 @@
 use chrono::Utc;
-use reqwest::Client;
+use reqwest::{
+    header::{
+        HeaderMap, HeaderValue, ACCEPT, ACCEPT_LANGUAGE, CACHE_CONTROL,
+        CONNECTION, UPGRADE_INSECURE_REQUESTS, USER_AGENT,
+    },
+    Client,
+};
 use rss::{Channel, Item};
+use scraper::{Html, Selector};
 use serde::Deserialize;
 use serde_json::Value;
 use std::error::Error;
@@ -149,6 +156,14 @@ struct NasdaqTradeHalt {
     pause_threshold_price: Option<String>,
 }
 
+#[derive(Debug)]
+struct ReutersArticle {
+    title: String,
+    link: String,
+    pub_date: Option<String>,
+    description: Option<String>,
+}
+
 enum FetchResult {
     Polymarket(Vec<PolymarketPrediction>),
     Kalshi(Vec<KalshiPrediction>),
@@ -157,6 +172,45 @@ enum FetchResult {
     PrNewswire(Vec<PrNewswireRelease>),
     GlobeNewswire(Vec<GlobeNewswireRelease>),
     NasdaqTradeHalt(Vec<NasdaqTradeHalt>),
+    Reuters(ReutersArticle),
+}
+
+fn build_client() -> Result<Client, Box<dyn std::error::Error>> {
+    let mut headers = HeaderMap::new();
+
+    headers.insert(
+        USER_AGENT,
+        HeaderValue::from_static(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+        ),
+    );
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_static(
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+        ),
+    );
+    headers.insert(
+        ACCEPT_LANGUAGE,
+        HeaderValue::from_static("en-US,en;q=0.9"),
+    );
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    headers.insert(CONNECTION, HeaderValue::from_static("keep-alive"));
+    headers.insert(
+        UPGRADE_INSECURE_REQUESTS,
+        HeaderValue::from_static("1"),
+    );
+
+    let client = Client::builder()
+        .default_headers(headers)
+        .cookie_store(true)
+        .brotli(true)
+        .gzip(true)
+        .deflate(true)
+        .build()?;
+
+    Ok(client)
 }
 
 // Gets all questions and outcome likelyhoods for the given Polymarket event at this current time. If a specific market is given, only returns data for that market.
@@ -633,8 +687,48 @@ fn get_ndaq_field(item: &Item, field: &str) -> Option<String> {
         .and_then(|ext| ext.value.clone())
 }
 
+async fn fetch_reuters(url: &str, client: &Client) -> Result<ReutersArticle, Box<dyn Error>> {
+    let body = client
+        .get(url)
+        .header("Referer", "https://www.reuters.com/")
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+
+    let document = scraper::Html::parse_document(&body);
+    let title_selector = Selector::parse(r#"span[data-testid="TitleHeading"]"#).unwrap();
+    let desc_selector = Selector::parse(r#"p[data-testid="Description"]"#).unwrap();
+    let link_selector = Selector::parse(r#"a[data-testid="TitleLink"]"#).unwrap();
+    let date_selector = Selector::parse(r#"a[data-testid="DateLineText"]"#).unwrap();
+
+    let article = ReutersArticle {
+        title: document
+            .select(&title_selector)
+            .next()
+            .map(|e| e.text().collect::<String>().trim().to_string())
+            .unwrap_or_default(),
+        description: document
+            .select(&desc_selector)
+            .next()
+            .map(|e| e.text().collect::<String>().trim().to_string()),
+        link: document
+            .select(&link_selector)
+            .next()
+            .and_then(|e| e.value().attr("href"))
+            .map(|s| s.to_string())
+            .unwrap_or_default(),
+        pub_date: document
+            .select(&date_selector)
+            .next()
+            .map(|e| e.text().collect::<String>().trim().to_string()),
+    };
+    Ok(article)
+}
+
 async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
-    let client = Client::builder().user_agent("MagnusTradingBot").build()?;
+    let client = build_client()?;
 
     match () {
         _ if identifier.contains("reddit.com") => {
@@ -662,13 +756,16 @@ async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
         _ if identifier.contains("globenewswire.com") => Ok(FetchResult::GlobeNewswire(
             fetch_globenewswire(&client, identifier).await?,
         )),
+        _ if identifier.contains("reuters.com") => Ok(FetchResult::Reuters(
+            fetch_reuters(identifier, &client).await?,
+        )),
         _ => Err(std::io::Error::other("Unsupported identifier").into()),
     }
 }
 
 #[tokio::main]
 async fn main() {
-    let identifier = "https://www.globenewswire.com/RssFeed/orgclass/1/feedTitle/GlobeNewswire%20-%20News%20about%20Public%20Companies";
+    let identifier = "https://www.reuters.com/live/";
 
     match fetch(identifier).await {
         Ok(FetchResult::Polymarket(markets)) => {
@@ -770,6 +867,12 @@ async fn main() {
                     println!();
                 }
             }
+        }
+        Ok(FetchResult::Reuters(article)) => {
+            println!("Title: {}", article.title);
+            println!("Published: {:?}", article.pub_date);
+            println!("Link: {}", article.link);
+            println!("Description: {:?}", article.description);
         }
         Err(e) => eprintln!("Error fetching market: {}", e),
     }
