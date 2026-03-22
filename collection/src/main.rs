@@ -7,7 +7,7 @@ use reqwest::{
     Client,
 };
 use rss::{Channel, Item};
-use scraper::{Html, Selector};
+use scraper::Html;
 use serde::Deserialize;
 use serde_json::Value;
 use std::error::Error;
@@ -157,7 +157,7 @@ struct NasdaqTradeHalt {
 }
 
 #[derive(Debug)]
-struct ReutersArticle {
+struct GoogleArticle {
     title: String,
     link: String,
     pub_date: Option<String>,
@@ -172,7 +172,7 @@ enum FetchResult {
     PrNewswire(Vec<PrNewswireRelease>),
     GlobeNewswire(Vec<GlobeNewswireRelease>),
     NasdaqTradeHalt(Vec<NasdaqTradeHalt>),
-    Reuters(ReutersArticle),
+    GoogleNews(GoogleArticle),
 }
 
 fn build_client() -> Result<Client, Box<dyn std::error::Error>> {
@@ -687,44 +687,40 @@ fn get_ndaq_field(item: &Item, field: &str) -> Option<String> {
         .and_then(|ext| ext.value.clone())
 }
 
-async fn fetch_reuters(url: &str, client: &Client) -> Result<ReutersArticle, Box<dyn Error>> {
-    let body = client
+async fn fetch_google_news(url: &str, client: &Client) -> Result<GoogleArticle, Box<dyn Error>> {
+    let bytes = client
         .get(url)
-        .header("Referer", "https://www.reuters.com/")
+        .header("Referer", "https://news.google.com/")
         .send()
         .await?
         .error_for_status()?
-        .text()
+        .bytes()
         .await?;
 
-    let document = scraper::Html::parse_document(&body);
-    let title_selector = Selector::parse(r#"span[data-testid="TitleHeading"]"#).unwrap();
-    let desc_selector = Selector::parse(r#"p[data-testid="Description"]"#).unwrap();
-    let link_selector = Selector::parse(r#"a[data-testid="TitleLink"]"#).unwrap();
-    let date_selector = Selector::parse(r#"a[data-testid="DateLineText"]"#).unwrap();
+    let channel = Channel::read_from(&bytes[..])?;
+    let item = channel
+        .items()
+        .iter()
+        .find(|item| item.title().is_some_and(|title| !title.trim().is_empty()))
+        .ok_or_else(|| std::io::Error::other("No Google News stories found"))?;
 
-    let article = ReutersArticle {
-        title: document
-            .select(&title_selector)
-            .next()
-            .map(|e| e.text().collect::<String>().trim().to_string())
-            .unwrap_or_default(),
-        description: document
-            .select(&desc_selector)
-            .next()
-            .map(|e| e.text().collect::<String>().trim().to_string()),
-        link: document
-            .select(&link_selector)
-            .next()
-            .and_then(|e| e.value().attr("href"))
-            .map(|s| s.to_string())
-            .unwrap_or_default(),
-        pub_date: document
-            .select(&date_selector)
-            .next()
-            .map(|e| e.text().collect::<String>().trim().to_string()),
-    };
-    Ok(article)
+    Ok(GoogleArticle {
+        title: item.title().unwrap_or_default().trim().to_string(),
+        link: item.link().unwrap_or(url).trim().to_string(),
+        pub_date: item.pub_date().map(|value| value.trim().to_string()),
+        description: item
+            .description()
+            .map(|value| {
+                Html::parse_fragment(value)
+                    .root_element()
+                    .text()
+                    .collect::<String>()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .filter(|value| !value.is_empty()),
+    })
 }
 
 async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
@@ -756,8 +752,8 @@ async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
         _ if identifier.contains("globenewswire.com") => Ok(FetchResult::GlobeNewswire(
             fetch_globenewswire(&client, identifier).await?,
         )),
-        _ if identifier.contains("reuters.com") => Ok(FetchResult::Reuters(
-            fetch_reuters(identifier, &client).await?,
+        _ if identifier.contains("google.com") => Ok(FetchResult::GoogleNews(
+            fetch_google_news(identifier, &client).await?,
         )),
         _ => Err(std::io::Error::other("Unsupported identifier").into()),
     }
@@ -765,7 +761,7 @@ async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
 
 #[tokio::main]
 async fn main() {
-    let identifier = "https://www.reuters.com/live/";
+    let identifier = "https://news.google.com/rss";
 
     match fetch(identifier).await {
         Ok(FetchResult::Polymarket(markets)) => {
@@ -868,7 +864,7 @@ async fn main() {
                 }
             }
         }
-        Ok(FetchResult::Reuters(article)) => {
+        Ok(FetchResult::GoogleNews(article)) => {
             println!("Title: {}", article.title);
             println!("Published: {:?}", article.pub_date);
             println!("Link: {}", article.link);
