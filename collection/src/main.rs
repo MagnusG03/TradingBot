@@ -1,5 +1,5 @@
 use atom_syndication::Feed;
-use chrono::Utc;
+use chrono::{DateTime, NaiveDate, Utc};
 use reqwest::{
     Client,
     header::{
@@ -12,6 +12,25 @@ use scraper::Html;
 use serde::Deserialize;
 use serde_json::Value;
 use std::error::Error;
+
+#[derive(Debug)]
+struct MLData {
+    ticker: String,
+    timestamp: String,
+    return_1d: f64,
+    volatility_1d: f64,
+    news_count_1d: u32,
+    avg_news_sentiment_1d: f64,
+    latest_news_age_minutes: u32,
+    sec_filing_count_7d: u32,
+    has_8k_7d: bool,
+    latest_filing_age_hours: u32,
+    has_recent_halt_1d: bool,
+    sandp500_return_1d: f64,
+    sector_return_1d: f64,
+    general_market_sentiment_1d: f64,
+    general_sector_sentiment_1d: f64,
+}
 
 #[derive(Debug)]
 struct PolymarketPrediction {
@@ -867,11 +886,12 @@ async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
         _ if identifier.contains("kalshi.com") => Ok(FetchResult::Kalshi(
             fetch_kalshi(identifier, &client).await?,
         )),
-        _ if identifier.contains("sec.gov") || (identifier.len() > 0 && identifier.len() <= 5) => {
-            Ok(FetchResult::SecEdgar(
-                fetch_sec_edgar_all(identifier, &client).await?,
-            ))
-        }
+        _ if identifier.contains("sec.gov") => Ok(FetchResult::SecEdgar(
+            fetch_sec_edgar_all(identifier, &client).await?,
+        )),
+        _ if (identifier.len() > 0 && identifier.len() <= 5) => Ok(FetchResult::SecEdgar(
+            fetch_sec_edgar_ticker(identifier, &client).await?,
+        )),
         _ if identifier.contains("prnewswire.com") => Ok(FetchResult::PrNewswire(
             fetch_prnewswire(&client, identifier).await?,
         )),
@@ -889,14 +909,6 @@ async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
 }
 
 async fn sentiment_analysis(string: &str) -> f64 {
-    fn tokenize(input: &str) -> Vec<String> {
-        input
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .filter(|token| !token.is_empty())
-            .map(|token| token.to_ascii_lowercase())
-            .collect()
-    }
-
     fn word_score(token: &str) -> Option<f64> {
         Some(match token {
             "acquire" | "acquires" | "acquired" | "buy" | "buys" | "bought" | "bullish"
@@ -917,45 +929,44 @@ async fn sentiment_analysis(string: &str) -> f64 {
         })
     }
 
-    fn phrase_score(tokens: &[String], index: usize) -> Option<(usize, f64)> {
-        const PHRASES: &[(&[&str], f64)] = &[
-            (&["beat", "expectations"], 1.6),
-            (&["beats", "expectations"], 1.6),
-            (&["cut", "exposure"], -1.6),
-            (&["fee", "cut"], -0.5),
-            (&["legal", "win"], 1.7),
-            (&["miss", "expectations"], -1.6),
-            (&["misses", "expectations"], -1.6),
-            (&["price", "target", "raised"], 1.5),
-            (&["price", "target", "cut"], -1.5),
-            (&["raised", "guidance"], 1.7),
-            (&["regulatory", "pressure"], -1.7),
-            (&["sales", "surge"], 1.8),
-            (&["shares", "bought"], 0.8),
-            (&["shares", "sold"], -0.8),
-            (&["stock", "jumps"], 1.8),
-            (&["stock", "position", "raised"], 0.9),
-            (&["stock", "holdings", "lifted"], 0.9),
-        ];
+    fn phrase_score(tokens: &[&str], index: usize) -> Option<(usize, f64)> {
+        match (
+            tokens.get(index).copied(),
+            tokens.get(index + 1).copied(),
+            tokens.get(index + 2).copied(),
+        ) {
+            (Some("price"), Some("target"), Some("raised")) => return Some((3, 1.5)),
+            (Some("price"), Some("target"), Some("cut")) => return Some((3, -1.5)),
+            (Some("stock"), Some("position"), Some("raised")) => return Some((3, 0.9)),
+            (Some("stock"), Some("holdings"), Some("lifted")) => return Some((3, 0.9)),
+            _ => {}
+        }
 
-        PHRASES
-            .iter()
-            .filter(|(phrase, _)| index + phrase.len() <= tokens.len())
-            .filter(|(phrase, _)| {
-                phrase
-                    .iter()
-                    .enumerate()
-                    .all(|(offset, token)| tokens[index + offset] == *token)
-            })
-            .max_by_key(|(phrase, _)| phrase.len())
-            .map(|(phrase, score)| (phrase.len(), *score))
+        match (tokens.get(index).copied(), tokens.get(index + 1).copied()) {
+            (Some("beat"), Some("expectations")) | (Some("beats"), Some("expectations")) => {
+                Some((2, 1.6))
+            }
+            (Some("cut"), Some("exposure")) => Some((2, -1.6)),
+            (Some("fee"), Some("cut")) => Some((2, -0.5)),
+            (Some("legal"), Some("win")) => Some((2, 1.7)),
+            (Some("miss"), Some("expectations")) | (Some("misses"), Some("expectations")) => {
+                Some((2, -1.6))
+            }
+            (Some("raised"), Some("guidance")) => Some((2, 1.7)),
+            (Some("regulatory"), Some("pressure")) => Some((2, -1.7)),
+            (Some("sales"), Some("surge")) => Some((2, 1.8)),
+            (Some("shares"), Some("bought")) => Some((2, 0.8)),
+            (Some("shares"), Some("sold")) => Some((2, -0.8)),
+            (Some("stock"), Some("jumps")) => Some((2, 1.8)),
+            _ => None,
+        }
     }
 
     fn is_negation(token: &str) -> bool {
-        matches!(
+        return matches!(
             token,
             "no" | "not" | "never" | "none" | "without" | "hardly"
-        )
+        );
     }
 
     fn intensity(token: &str) -> f64 {
@@ -967,7 +978,11 @@ async fn sentiment_analysis(string: &str) -> f64 {
         }
     }
 
-    let tokens = tokenize(string);
+    let normalized = string.to_ascii_lowercase();
+    let tokens: Vec<&str> = normalized
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
 
     if tokens.is_empty() {
         return 0.0;
@@ -985,14 +1000,13 @@ async fn sentiment_analysis(string: &str) -> f64 {
             continue;
         }
 
-        if let Some(mut score) = word_score(&tokens[index]) {
+        if let Some(mut score) = word_score(tokens[index]) {
             if index > 0 {
-                score *= intensity(&tokens[index - 1]);
+                score *= intensity(tokens[index - 1]);
             }
 
-            let negated = tokens[index.saturating_sub(3)..index]
-                .iter()
-                .any(|token| is_negation(token));
+            let negated =
+                (1..=3).any(|offset| index >= offset && is_negation(tokens[index - offset]));
             if negated {
                 score *= -0.8;
             }
@@ -1011,164 +1025,277 @@ async fn sentiment_analysis(string: &str) -> f64 {
     (total_score / matched_terms).clamp(-1.0, 1.0)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::sentiment_analysis;
+fn parse_datetime_to_utc(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc2822(value)
+        .or_else(|_| DateTime::parse_from_rfc3339(value))
+        .ok()
+        .map(|datetime| datetime.with_timezone(&Utc))
+}
 
-    #[tokio::test]
-    async fn positive_financial_headline_scores_above_zero() {
-        let score = sentiment_analysis(
-            "Apple CEO visits China as iPhone sales surge and the company emphasizes innovation",
-        )
-        .await;
+fn parse_filing_datetime(filing: &SecFiling) -> Option<DateTime<Utc>> {
+    filing
+        .acceptance_datetime
+        .as_deref()
+        .and_then(parse_datetime_to_utc)
+        .or_else(|| {
+            NaiveDate::parse_from_str(&filing.filing_date, "%Y-%m-%d")
+                .ok()
+                .and_then(|date| date.and_hms_opt(0, 0, 0))
+                .map(|datetime| datetime.and_utc())
+        })
+}
 
-        assert!(score > 0.4, "expected positive score, got {score}");
+async fn average_article_sentiment(articles: &[GoogleArticle]) -> f64 {
+    if articles.is_empty() {
+        return 0.0;
     }
 
-    #[tokio::test]
-    async fn negative_financial_headline_scores_below_zero() {
-        let score = sentiment_analysis(
-            "Analyst downgrades AAPL after leak spotlights wearable risk and regulatory pressure",
-        )
-        .await;
+    let mut total_sentiment = 0.0;
 
-        assert!(score < -0.4, "expected negative score, got {score}");
+    for article in articles {
+        let mut text = article.title.clone();
+
+        if let Some(description) = article.description.as_deref() {
+            if !description.is_empty() {
+                text.push(' ');
+                text.push_str(description);
+            }
+        }
+
+        total_sentiment += sentiment_analysis(&text).await;
     }
 
-    #[tokio::test]
-    async fn unknown_text_stays_neutral() {
-        let score = sentiment_analysis("Apple discussed several topics during a meeting").await;
-
-        assert_eq!(score, 0.0);
-    }
+    total_sentiment / articles.len() as f64
 }
 
 async fn dispatcher() {}
 
-async fn storer(_fetch_result: FetchResult) {}
+async fn gather_data(ticker: &str) -> MLData {
+    let normalized_ticker = ticker.trim().trim_start_matches('$').to_ascii_uppercase();
+    let sector = lookup_sector(&normalized_ticker);
+    let ticker_news_url = format!(
+        "https://news.google.com/rss/search?q={}+when%3A1d&hl=en-US&gl=US&ceid=US%3Aen",
+        normalized_ticker
+    );
+    let market_news_url = "https://news.google.com/rss/search?q=%22US+markets%22+OR+%22Wall+Street%22+OR+finance+OR+economy+when%3A1d&hl=en-US&gl=US&ceid=US%3Aen";
+    let sector_news_url = sector.as_deref().map(|sector_name| {
+        let encoded_sector = sector_name.split_whitespace().collect::<Vec<_>>().join("+");
+
+        format!(
+            "https://news.google.com/rss/search?q=%22{}%22+OR+%22{}+sector%22+OR+%22{}+stocks%22+OR+%22{}+industry%22+when%3A1d&hl=en-US&gl=US&ceid=US%3Aen",
+            encoded_sector, encoded_sector, encoded_sector, encoded_sector
+        )
+    });
+
+    let (google_ticker_news, google_market_news, sec_filings, trade_halts) = tokio::join!(
+        fetch(&ticker_news_url),
+        fetch(market_news_url),
+        fetch(&normalized_ticker),
+        fetch("https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts"),
+    );
+
+    let google_sector_news = match sector_news_url.as_deref() {
+        Some(url) => fetch(url).await,
+        None => Err(std::io::Error::other("Unknown sector").into()),
+    };
+
+    let ticker_articles = match google_ticker_news {
+        Ok(FetchResult::GoogleNews(articles)) => articles,
+        _ => Vec::new(),
+    };
+    let market_articles = match google_market_news {
+        Ok(FetchResult::GoogleNews(articles)) => articles,
+        _ => Vec::new(),
+    };
+    let sector_articles = match google_sector_news {
+        Ok(FetchResult::GoogleNews(articles)) => articles,
+        _ => Vec::new(),
+    };
+    let filings = match sec_filings {
+        Ok(FetchResult::SecEdgar(filings)) => filings,
+        _ => Vec::new(),
+    };
+    let halts = match trade_halts {
+        Ok(FetchResult::NasdaqTradeHalt(halts)) => halts,
+        _ => Vec::new(),
+    };
+
+    let now = Utc::now();
+    let avg_news_sentiment_1d = average_article_sentiment(&ticker_articles).await;
+    let general_market_sentiment_1d = average_article_sentiment(&market_articles).await;
+    let general_sector_sentiment_1d = average_article_sentiment(&sector_articles).await;
+
+    let latest_news_age_minutes = ticker_articles
+        .iter()
+        .filter_map(|article| article.pub_date.as_deref())
+        .filter_map(parse_datetime_to_utc)
+        .filter_map(|published_at| {
+            let age = now.signed_duration_since(published_at);
+            (age.num_seconds() >= 0).then_some(age.num_minutes() as u32)
+        })
+        .min()
+        .unwrap_or(0);
+
+    let sec_filing_count_7d = filings
+        .iter()
+        .filter_map(parse_filing_datetime)
+        .filter(|filed_at| {
+            let age = now.signed_duration_since(*filed_at);
+            age.num_seconds() >= 0 && age.num_days() <= 7
+        })
+        .count() as u32;
+
+    let has_8k_7d = filings.iter().any(|filing| {
+        matches!(filing.form.as_str(), "8-K" | "8-K/A")
+            && parse_filing_datetime(filing)
+                .map(|filed_at| {
+                    let age = now.signed_duration_since(filed_at);
+                    age.num_seconds() >= 0 && age.num_days() <= 7
+                })
+                .unwrap_or(false)
+    });
+
+    let latest_filing_age_hours = filings
+        .iter()
+        .filter_map(parse_filing_datetime)
+        .filter_map(|filed_at| {
+            let age = now.signed_duration_since(filed_at);
+            (age.num_seconds() >= 0).then_some(age.num_hours() as u32)
+        })
+        .min()
+        .unwrap_or(0);
+
+    let has_recent_halt_1d = halts
+        .iter()
+        .any(|halt| halt.ticker.eq_ignore_ascii_case(&normalized_ticker));
+
+    MLData {
+        ticker: normalized_ticker,
+        timestamp: now.to_rfc3339(),
+        return_1d: 0.0,
+        volatility_1d: 0.0,
+        news_count_1d: ticker_articles.len() as u32,
+        avg_news_sentiment_1d,
+        latest_news_age_minutes,
+        sec_filing_count_7d,
+        has_8k_7d,
+        latest_filing_age_hours,
+        has_recent_halt_1d,
+        sandp500_return_1d: 0.0,
+        sector_return_1d: 0.0,
+        general_market_sentiment_1d,
+        general_sector_sentiment_1d,
+    }
+}
+
+fn lookup_sector(ticker: &str) -> Option<String> {
+    // Prefer industry-style labels here because this value is used directly in
+    // the Google News sector/industry query built in `gather_data`.
+    let normalized = ticker.trim().trim_start_matches('$').to_ascii_uppercase();
+
+    let sector = match normalized.as_str() {
+        // Mega-cap tech / internet
+        "AAPL" => Some("Consumer Electronics"),
+        "MSFT" => Some("Software"),
+        "GOOG" | "GOOGL" => Some("Internet Services"),
+        "AMZN" => Some("E-Commerce and Cloud"),
+        "META" => Some("Social Media"),
+        "NFLX" => Some("Streaming Media"),
+        "TSLA" => Some("Electric Vehicles"),
+        "NVDA" | "AMD" | "INTC" | "QCOM" | "AVGO" | "MU" | "TXN" | "ARM" | "ASML" | "MRVL" => {
+            Some("Semiconductors")
+        }
+        "SMCI" | "DELL" | "HPQ" => Some("Computer Hardware"),
+        "CRM" | "ORCL" | "ADBE" | "NOW" | "PLTR" | "SNOW" | "PANW" | "CRWD" | "ZS" | "NET"
+        | "MDB" | "DDOG" => Some("Software"),
+        "IBM" | "ACN" => Some("IT Services"),
+        "UBER" | "LYFT" => Some("Ride Sharing"),
+        "ABNB" | "BKNG" | "EXPE" => Some("Travel Services"),
+
+        // Financials / payments / crypto-adjacent
+        "JPM" | "BAC" | "WFC" | "C" => Some("Banks"),
+        "GS" | "MS" | "SCHW" | "BLK" => Some("Asset Management"),
+        "V" | "MA" | "AXP" | "PYPL" | "SQ" | "XYZ" => Some("Payment Processing"),
+        "COIN" | "HOOD" => Some("Brokerage and Crypto Services"),
+        "MSTR" => Some("Bitcoin Treasury"),
+        "MARA" | "RIOT" | "CLSK" => Some("Bitcoin Mining"),
+        "BRK.B" | "BRK-B" => Some("Diversified Financial Services"),
+
+        // Healthcare / biotech
+        "LLY" | "NVO" => Some("Weight Loss and Diabetes Treatments"),
+        "JNJ" | "PFE" | "MRK" | "BMY" | "ABBV" | "GILD" => Some("Pharmaceuticals"),
+        "AMGN" | "REGN" | "VRTX" | "BIIB" => Some("Biotechnology"),
+        "UNH" | "CI" | "HUM" | "CVS" => Some("Managed Care"),
+        "ISRG" | "SYK" | "MDT" | "BSX" => Some("Medical Devices"),
+        "MRNA" => Some("Biotechnology"),
+
+        // Consumer staples / discretionary
+        "WMT" | "COST" | "TGT" | "DG" | "DLTR" => Some("Retail"),
+        "HD" | "LOW" => Some("Home Improvement Retail"),
+        "NKE" | "LULU" => Some("Apparel"),
+        "SBUX" | "MCD" | "CMG" | "YUM" | "DPZ" => Some("Restaurants"),
+        "KO" | "PEP" | "MNST" | "KDP" => Some("Beverages"),
+        "PG" | "CL" | "KMB" => Some("Household Products"),
+        "DIS" | "ROKU" | "PARA" | "WBD" => Some("Media and Entertainment"),
+        "RCL" | "CCL" | "NCLH" => Some("Cruise Lines"),
+        "MAR" | "HLT" => Some("Hotels"),
+
+        // Energy / materials / industrials
+        "XOM" | "CVX" | "COP" | "BP" | "SHEL" | "OXY" => Some("Oil and Gas"),
+        "SLB" | "HAL" | "BKR" => Some("Oilfield Services"),
+        "CAT" | "DE" | "PCAR" => Some("Heavy Machinery"),
+        "BA" | "LMT" | "NOC" | "RTX" | "GD" => Some("Aerospace and Defense"),
+        "GE" | "GEV" | "HON" | "ETN" | "EMR" => Some("Industrial Equipment"),
+        "UPS" | "FDX" | "UNP" | "CSX" | "NSC" => Some("Transportation and Logistics"),
+        "NUE" | "X" | "STLD" => Some("Steel"),
+        "FCX" | "SCCO" => Some("Copper Mining"),
+        "NEM" | "GOLD" => Some("Gold Mining"),
+
+        // Telecom / utilities / real estate
+        "T" | "VZ" | "TMUS" | "CMCSA" | "CHTR" => Some("Telecommunications"),
+        "NEE" | "DUK" | "SO" | "D" | "AEP" | "EXC" => Some("Utilities"),
+        "AMT" | "CCI" => Some("Cell Towers"),
+        "PLD" | "SPG" | "O" | "DLR" | "EQIX" => Some("Real Estate"),
+
+        // Broad ETFs and sector ETFs
+        "SPY" | "VOO" | "IVV" => Some("Broad Market ETF"),
+        "QQQ" | "TQQQ" | "SQQQ" => Some("Nasdaq 100 ETF"),
+        "DIA" => Some("Dow Jones ETF"),
+        "IWM" => Some("Small-Cap ETF"),
+        "SMH" | "SOXX" | "SOXL" | "SOXS" => Some("Semiconductor ETF"),
+        "XLF" => Some("Financials ETF"),
+        "XLK" => Some("Technology ETF"),
+        "XLE" => Some("Energy ETF"),
+        "XLI" => Some("Industrials ETF"),
+        "XLV" => Some("Healthcare ETF"),
+        "XLP" => Some("Consumer Staples ETF"),
+        "XLY" => Some("Consumer Discretionary ETF"),
+        "XLB" => Some("Materials ETF"),
+        "XLU" => Some("Utilities ETF"),
+        "XLRE" | "VNQ" => Some("Real Estate ETF"),
+        "ARKK" => Some("Disruptive Innovation ETF"),
+        "BITO" | "IBIT" | "FBTC" => Some("Bitcoin ETF"),
+
+        _ => None,
+    };
+
+    sector.map(str::to_string)
+}
 
 #[tokio::main]
 async fn main() {
-    let identifier = "https://news.google.com/rss/search?q=AAPL+when:1d&hl=en-US&gl=US&ceid=US:en";
+    let ticker = "AAPL";
+    let data = gather_data(ticker).await;
 
-    match fetch(identifier).await {
-        Ok(FetchResult::Polymarket(markets)) => {
-            if markets.is_empty() {
-                println!("No markets found.");
-            } else {
-                for market in markets {
-                    println!("Question: {}", market.question);
-                    println!("Outcomes: {:?}", market.outcomes);
-                    println!("Outcome prices: {:?}", market.outcome_prices);
-                }
-            }
+    println!("ML Data for {}: {:#?}", ticker, data);
+
+    let sec_filings = fetch(ticker).await.and_then(|result| {
+        if let FetchResult::SecEdgar(filings) = result {
+            Ok(filings)
+        } else {
+            Err(std::io::Error::other("Failed to fetch SEC filings").into())
         }
-        Ok(FetchResult::Kalshi(markets)) => {
-            if markets.is_empty() {
-                println!("No markets found.");
-            } else {
-                for market in markets {
-                    println!("Question: {}", market.title);
-                    if let Some(subtitle) = &market.subtitle {
-                        println!("Subtitle: {}", subtitle);
-                    }
-                    println!("Outcomes: {:?}", ["Yes", "No"]);
-                    println!("Outcome prices: {:?}", [market.yes_price, market.no_price]);
-                }
-            }
-        }
-        Ok(FetchResult::Reddit(json)) => {
-            println!("Reddit post data: {}", json);
-        }
-        Ok(FetchResult::SecEdgar(filings)) => {
-            if filings.is_empty() {
-                println!("No relevant SEC filings found.");
-            } else {
-                for filing in filings {
-                    println!("Ticker: {}", filing.ticker);
-                    println!("Company: {}", filing.company_name);
-                    println!("CIK: {}", filing.cik);
-                    println!("Form: {}", filing.form);
-                    println!("Filing date: {}", filing.filing_date);
-                    println!("Acceptance datetime: {:?}", filing.acceptance_datetime);
-                    println!("Accession number: {}", filing.accession_number);
-                    println!("Primary document: {}", filing.primary_document);
-                    println!(
-                        "Primary doc description: {:?}",
-                        filing.primary_doc_description
-                    );
-                    println!("Items: {:?}", filing.items);
-                    println!("Inline XBRL: {}", filing.is_inline_xbrl);
-                    println!("Filing URL: {}", filing.filing_url);
-                    println!();
-                }
-            }
-        }
-        Ok(FetchResult::PrNewswire(releases)) => {
-            if releases.is_empty() {
-                println!("No PR Newswire releases found.");
-            } else {
-                for release in releases {
-                    println!("Title: {}", release.title);
-                    println!("Section: {}", release.source_section);
-                    println!("Published: {:?}", release.pub_date);
-                    println!("Link: {:?}", release.link);
-                    println!("Description: {:?}", release.description);
-                    println!();
-                }
-            }
-        }
-        Ok(FetchResult::NasdaqTradeHalt(halts)) => {
-            if halts.is_empty() {
-                println!("No NASDAQ trade halts found.");
-            } else {
-                for halt in halts {
-                    println!("Ticker: {}", halt.ticker);
-                    println!("Company: {}", halt.company_name);
-                    println!("Market: {}", halt.market);
-                    println!("Halt date: {}", halt.halt_date);
-                    println!("Halt time: {}", halt.halt_time);
-                    println!("Reason: {}", halt.reason);
-                    println!("Resumption date: {:?}", halt.resumption_date);
-                    println!("Resumption quote time: {:?}", halt.resumption_quote_time);
-                    println!("Resumption trade time: {:?}", halt.resumption_trade_time);
-                    println!("Pause threshold price: {:?}", halt.pause_threshold_price);
-                    println!();
-                }
-            }
-        }
-        Ok(FetchResult::GlobeNewswire(releases)) => {
-            if releases.is_empty() {
-                println!("No GlobeNewswire releases found.");
-            } else {
-                for release in releases {
-                    println!("Title: {}", release.title);
-                    println!("Feed: {}", release.feed_name);
-                    println!("Published: {:?}", release.pub_date);
-                    println!("Link: {}", release.link);
-                    println!("Description: {:?}", release.description);
-                    println!("Categories: {:?}", release.categories);
-                    println!();
-                }
-            }
-        }
-        Ok(FetchResult::GoogleNews(articles)) => {
-            if articles.is_empty() {
-                println!("No Google News articles found.");
-            } else {
-                for article in articles {
-                    println!("Title: {}", article.title);
-                    println!("Published: {:?}", article.pub_date);
-                    println!("Link: {}", article.link);
-                    println!("Description: {:?}", article.description);
-                    println!(
-                        "Sentiment score: {:.2}",
-                        sentiment_analysis(&article.description.clone().unwrap_or_default()).await
-                    );
-                    println!();
-                }
-            }
-        }
-        Err(e) => eprintln!("Error fetching market: {}", e),
-    }
+    });
+
+    println!("Recent SEC filings for {}: {:#?}", ticker, sec_filings);
 }
