@@ -3,7 +3,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use reqwest::{
     Client,
     header::{
-        ACCEPT, ACCEPT_LANGUAGE, CACHE_CONTROL, CONNECTION, HeaderMap, HeaderValue,
+        ACCEPT, ACCEPT_LANGUAGE, CACHE_CONTROL, CONNECTION, HeaderMap, HeaderName, HeaderValue,
         UPGRADE_INSECURE_REQUESTS, USER_AGENT,
     },
 };
@@ -194,20 +194,33 @@ enum FetchResult {
     GoogleNews(Vec<GoogleArticle>),
 }
 
-fn build_client() -> Result<Client, Box<dyn std::error::Error>> {
+fn build_client() -> Client {
     let mut headers = HeaderMap::new();
+    let sec_contact_email = std::env::var("SEC_CONTACT_EMAIL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "admin@example.com".to_string());
+    let sec_company_name = std::env::var("SEC_COMPANY_NAME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "TradingBot".to_string());
+    let sec_user_agent = format!("{} {}", sec_company_name, sec_contact_email);
 
     headers.insert(
         USER_AGENT,
-        HeaderValue::from_static(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-             (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        ),
+        HeaderValue::from_str(&sec_user_agent).unwrap_or_else(|_| {
+            HeaderValue::from_static("TradingBot admin@example.com")
+        }),
+    );
+    headers.insert(
+        HeaderName::from_static("from"),
+        HeaderValue::from_str(&sec_contact_email)
+            .unwrap_or_else(|_| HeaderValue::from_static("admin@example.com")),
     );
     headers.insert(
         ACCEPT,
         HeaderValue::from_static(
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "application/json,application/atom+xml,application/xml;q=0.9,text/xml;q=0.9,text/html;q=0.8,*/*;q=0.7",
         ),
     );
     headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
@@ -215,15 +228,14 @@ fn build_client() -> Result<Client, Box<dyn std::error::Error>> {
     headers.insert(CONNECTION, HeaderValue::from_static("keep-alive"));
     headers.insert(UPGRADE_INSECURE_REQUESTS, HeaderValue::from_static("1"));
 
-    let client = Client::builder()
+    Client::builder()
         .default_headers(headers)
         .cookie_store(true)
         .brotli(true)
         .gzip(true)
         .deflate(true)
-        .build()?;
-
-    Ok(client)
+        .build()
+        .unwrap_or_else(|_| Client::new())
 }
 
 // Gets all questions and outcome likelyhoods for the given Polymarket event at this current time. If a specific market is given, only returns data for that market.
@@ -869,8 +881,7 @@ async fn fetch_google_news(
     Ok(articles)
 }
 
-async fn fetch(identifier: &str) -> Result<FetchResult, Box<dyn Error>> {
-    let client = build_client()?;
+async fn fetch(identifier: &str, client: &Client) -> Result<FetchResult, Box<dyn Error>> {
 
     match () {
         _ if identifier.contains("reddit.com") => {
@@ -1071,6 +1082,8 @@ async fn average_article_sentiment(articles: &[GoogleArticle]) -> f64 {
 async fn dispatcher() {}
 
 async fn gather_data(ticker: &str) -> MLData {
+    let client = build_client();
+
     let normalized_ticker = ticker.trim().trim_start_matches('$').to_ascii_uppercase();
     let sector = lookup_sector(&normalized_ticker);
     let ticker_news_url = format!(
@@ -1088,14 +1101,14 @@ async fn gather_data(ticker: &str) -> MLData {
     });
 
     let (google_ticker_news, google_market_news, sec_filings, trade_halts) = tokio::join!(
-        fetch(&ticker_news_url),
-        fetch(market_news_url),
-        fetch(&normalized_ticker),
-        fetch("https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts"),
+        fetch(&ticker_news_url, &client),
+        fetch(market_news_url, &client),
+        fetch(&normalized_ticker, &client),
+        fetch("https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts", &client),
     );
 
     let google_sector_news = match sector_news_url.as_deref() {
-        Some(url) => fetch(url).await,
+        Some(url) => fetch(url, &client).await,
         None => Err(std::io::Error::other("Unknown sector").into()),
     };
 
@@ -1288,14 +1301,4 @@ async fn main() {
     let data = gather_data(ticker).await;
 
     println!("ML Data for {}: {:#?}", ticker, data);
-
-    let sec_filings = fetch(ticker).await.and_then(|result| {
-        if let FetchResult::SecEdgar(filings) = result {
-            Ok(filings)
-        } else {
-            Err(std::io::Error::other("Failed to fetch SEC filings").into())
-        }
-    });
-
-    println!("Recent SEC filings for {}: {:#?}", ticker, sec_filings);
 }
