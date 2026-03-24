@@ -197,6 +197,8 @@ fn is_relevant_form(form: &str) -> bool {
             | "8-K/A"
             | "6-K"
             | "6-K/A"
+            | "20-F"
+            | "20-F/A"
             | "10-Q"
             | "10-Q/A"
             | "10-K"

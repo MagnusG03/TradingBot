@@ -46,6 +46,11 @@ const SECTOR_ENTRIES: &[SectorEntry] = &[
         tickers: &["TSLA"],
     },
     SectorEntry {
+        sector: "Luxury Automobiles",
+        benchmark: "XLY",
+        tickers: &["RACE"],
+    },
+    SectorEntry {
         sector: "Semiconductors",
         benchmark: "SOXX",
         tickers: &[
