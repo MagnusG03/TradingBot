@@ -4,7 +4,7 @@ use chrono::{Duration, Utc};
 use reqwest::{Client, RequestBuilder};
 use serde::Deserialize;
 
-use crate::{AppResult, structures::AlpacaStockMetrics, utils::normalize_ticker};
+use crate::{AppResult, types::AlpacaStockMetrics, utils::normalize_ticker};
 
 #[derive(Debug, Deserialize)]
 struct LatestTradesResponse {

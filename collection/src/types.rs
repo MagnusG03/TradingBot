@@ -1,5 +1,3 @@
-use serde_json::Value;
-
 #[derive(Debug)]
 pub struct MLData {
     pub ticker: String,
@@ -99,16 +97,4 @@ pub struct AlpacaStockMetrics {
     pub peak_price_30d: f64,
     pub return_1d: f64,
     pub volatility_1d: f64,
-}
-
-#[derive(Debug)]
-pub enum FetchResult {
-    Polymarket(Vec<PolymarketPrediction>),
-    Kalshi(Vec<KalshiPrediction>),
-    Reddit(Value),
-    SecEdgar(Vec<SecFiling>),
-    PrNewswire(Vec<PrNewswireRelease>),
-    GlobeNewswire(Vec<GlobeNewswireRelease>),
-    NasdaqTradeHalt(Vec<NasdaqTradeHalt>),
-    GoogleNews(Vec<GoogleArticle>),
 }

@@ -340,26 +340,6 @@ pub fn lookup_sector_benchmark_symbol(ticker: &str, sector: Option<&str>) -> Opt
         .or_else(|| sector.and_then(benchmark_for_sector))
 }
 
-pub fn build_ticker_news_url(ticker: &str) -> String {
-    format!(
-        "https://news.google.com/rss/search?q={}+when%3A6h&hl=en-US&gl=US&ceid=US%3Aen",
-        normalize_ticker(ticker)
-    )
-}
-
-pub fn build_market_news_url() -> &'static str {
-    "https://news.google.com/rss/search?q=%22US+markets%22+OR+%22Wall+Street%22+OR+finance+OR+economy+when%3A1d&hl=en-US&gl=US&ceid=US%3Aen"
-}
-
-pub fn build_sector_news_url(sector: &str) -> String {
-    let encoded = sector.split_whitespace().collect::<Vec<_>>().join("+");
-
-    format!(
-        "https://news.google.com/rss/search?q=%22{0}%22+OR+%22{0}+sector%22+OR+%22{0}+stocks%22+OR+%22{0}+industry%22+when%3A1d&hl=en-US&gl=US&ceid=US%3Aen",
-        encoded
-    )
-}
-
 fn find_sector_entry(ticker: &str) -> Option<&'static SectorEntry> {
     SECTOR_ENTRIES.iter().find(|entry| {
         entry

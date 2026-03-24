@@ -1,9 +1,9 @@
-use collection::gather_data;
+use collection::collect_ml_data;
 
 #[tokio::main]
 async fn main() {
     let ticker = "TSLA";
-    let data = gather_data(ticker).await;
+    let data = collect_ml_data(ticker).await;
 
     println!("ML Data for {}: {:#?}", ticker, data);
 }

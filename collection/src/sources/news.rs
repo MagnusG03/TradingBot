@@ -5,8 +5,10 @@ use scraper::Html;
 
 use crate::{
     AppResult,
-    structures::{GlobeNewswireRelease, GoogleArticle, NasdaqTradeHalt, PrNewswireRelease},
+    types::{GlobeNewswireRelease, GoogleArticle, NasdaqTradeHalt, PrNewswireRelease},
 };
+
+const GOOGLE_NEWS_REFERER: &str = "https://news.google.com/";
 
 pub async fn fetch_prnewswire(
     client: &Client,
@@ -93,7 +95,7 @@ pub async fn fetch_nasdaq_trade_halt(
 }
 
 pub async fn fetch_google_news(url: &str, client: &Client) -> AppResult<Vec<GoogleArticle>> {
-    let channel = read_channel(client, url, Some("https://news.google.com/")).await?;
+    let channel = read_channel(client, &url, Some(GOOGLE_NEWS_REFERER)).await?;
     let articles: Vec<GoogleArticle> = channel
         .items()
         .iter()

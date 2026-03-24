@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::structures::GoogleArticle;
+use crate::types::GoogleArticle;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct SentimentTally {
@@ -259,7 +259,7 @@ fn phrase_score(tokens: &[&str], index: usize) -> Option<(usize, f64)> {
 }
 
 fn is_negation(token: &str) -> bool {
-    matches!(
+    return matches!(
         token,
         "no" | "not" | "never" | "none" | "without" | "hardly" | "neither"
     )

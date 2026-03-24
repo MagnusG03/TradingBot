@@ -1,6 +1,6 @@
 use chrono::{DateTime, NaiveDate, Utc};
 
-use crate::structures::SecFiling;
+use crate::types::SecFiling;
 
 pub fn normalize_ticker(value: &str) -> String {
     value.trim().trim_start_matches('$').to_ascii_uppercase()

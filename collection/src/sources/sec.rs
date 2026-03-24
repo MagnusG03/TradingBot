@@ -4,7 +4,7 @@ use atom_syndication::{Entry, Feed};
 use reqwest::Client;
 use serde::Deserialize;
 
-use crate::{AppResult, structures::SecFiling, utils::normalize_ticker};
+use crate::{AppResult, types::SecFiling, utils::normalize_ticker};
 
 #[derive(Debug, Deserialize)]
 struct SecSubmissions {

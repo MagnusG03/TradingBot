@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 use crate::{
     AppResult,
-    structures::{KalshiPrediction, PolymarketPrediction},
+    types::{KalshiPrediction, PolymarketPrediction},
 };
 
 #[derive(Debug, Deserialize)]
