@@ -63,8 +63,8 @@ pub async fn gather_data(ticker: &str) -> MLData {
         volatility_1d: price_metrics
             .as_ref()
             .map_or(0.0, |metrics| metrics.volatility_1d),
-        news_count_1d: ticker_articles.len() as u32,
-        avg_news_sentiment_1d: average_article_sentiment(&ticker_articles),
+        news_count_6h: ticker_articles.len() as u32,
+        avg_news_sentiment_6h: average_article_sentiment(&ticker_articles),
         latest_news_age_minutes: latest_news_age_minutes(&ticker_articles, now),
         sec_filing_count_7d: recent_filing_count(&filings, now),
         has_8k_7d: has_recent_8k(&filings, now),

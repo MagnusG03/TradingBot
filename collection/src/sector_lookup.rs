@@ -342,7 +342,7 @@ pub fn lookup_sector_benchmark_symbol(ticker: &str, sector: Option<&str>) -> Opt
 
 pub fn build_ticker_news_url(ticker: &str) -> String {
     format!(
-        "https://news.google.com/rss/search?q={}+when%3A1d&hl=en-US&gl=US&ceid=US%3Aen",
+        "https://news.google.com/rss/search?q={}+when%3A6h&hl=en-US&gl=US&ceid=US%3Aen",
         normalize_ticker(ticker)
     )
 }
