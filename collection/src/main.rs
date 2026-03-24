@@ -11,12 +11,14 @@ use rss::{Channel, Item};
 use scraper::Html;
 use serde::Deserialize;
 use serde_json::Value;
-use std::{collections::HashSet, error::Error};
+use std::{collections::{HashMap, HashSet}, error::Error};
 
 #[derive(Debug)]
 struct MLData {
     ticker: String,
     timestamp: String,
+    current_price: f64,
+    peak_price_30d: f64,
     return_1d: f64,
     volatility_1d: f64,
     news_count_1d: u32,
@@ -1331,18 +1333,21 @@ fn average_article_sentiment(articles: &[GoogleArticle]) -> f64 {
     }
 }
 
-async fn dispatcher() {}
-
 async fn gather_data(ticker: &str) -> MLData {
     let client = build_client();
 
     let normalized_ticker = ticker.trim().trim_start_matches('$').to_ascii_uppercase();
     let sector = lookup_sector(&normalized_ticker);
+    let sector_benchmark_symbol =
+        lookup_sector_benchmark_symbol(&normalized_ticker, sector.as_deref());
+
     let ticker_news_url = format!(
         "https://news.google.com/rss/search?q={}+when%3A1d&hl=en-US&gl=US&ceid=US%3Aen",
         normalized_ticker
     );
+
     let market_news_url = "https://news.google.com/rss/search?q=%22US+markets%22+OR+%22Wall+Street%22+OR+finance+OR+economy+when%3A1d&hl=en-US&gl=US&ceid=US%3Aen";
+
     let sector_news_url = sector.as_deref().map(|sector_name| {
         let encoded_sector = sector_name.split_whitespace().collect::<Vec<_>>().join("+");
 
@@ -1352,14 +1357,27 @@ async fn gather_data(ticker: &str) -> MLData {
         )
     });
 
-    let (google_ticker_news, google_market_news, sec_filings, trade_halts) = tokio::join!(
+    let (
+        google_ticker_news,
+        google_market_news,
+        sec_filings,
+        trade_halts,
+        alpaca_metrics,
+        sp500_return_res,
+        sector_return_res,
+    ) = tokio::join!(
         fetch(&ticker_news_url, &client),
         fetch(market_news_url, &client),
         fetch(&normalized_ticker, &client),
-        fetch(
-            "https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts",
-            &client
-        ),
+        fetch("https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts", &client),
+        fetch_alpaca_stock_metrics(&normalized_ticker, &client),
+        fetch_return_1d_from_snapshot("SPY", &client),
+        async {
+            match sector_benchmark_symbol {
+                Some(symbol) => fetch_return_1d_from_snapshot(symbol, &client).await,
+                None => Ok::<f64, Box<dyn std::error::Error>>(0.0),
+            }
+        },
     );
 
     let google_sector_news = match sector_news_url.as_deref() {
@@ -1387,6 +1405,19 @@ async fn gather_data(ticker: &str) -> MLData {
         Ok(FetchResult::NasdaqTradeHalt(halts)) => halts,
         _ => Vec::new(),
     };
+
+    let price_metrics = match alpaca_metrics {
+        Ok(metrics) => metrics,
+        Err(_) => AlpacaStockMetrics {
+            current_price: 0.0,
+            peak_price_30d: 0.0,
+            return_1d: 0.0,
+            volatility_1d: 0.0,
+        },
+    };
+
+    let sandp500_return_1d = sp500_return_res.unwrap_or(0.0);
+    let sector_return_1d = sector_return_res.unwrap_or(0.0);
 
     let now = Utc::now();
     let avg_news_sentiment_1d = average_article_sentiment(&ticker_articles);
@@ -1440,8 +1471,10 @@ async fn gather_data(ticker: &str) -> MLData {
     MLData {
         ticker: normalized_ticker,
         timestamp: now.to_rfc3339(),
-        return_1d: 0.0,
-        volatility_1d: 0.0,
+        current_price: price_metrics.current_price,
+        peak_price_30d: price_metrics.peak_price_30d,
+        return_1d: price_metrics.return_1d,
+        volatility_1d: price_metrics.volatility_1d,
         news_count_1d: ticker_articles.len() as u32,
         avg_news_sentiment_1d,
         latest_news_age_minutes,
@@ -1449,8 +1482,8 @@ async fn gather_data(ticker: &str) -> MLData {
         has_8k_7d,
         latest_filing_age_hours,
         has_recent_halt_1d,
-        sandp500_return_1d: 0.0,
-        sector_return_1d: 0.0,
+        sandp500_return_1d,
+        sector_return_1d,
         general_market_sentiment_1d,
         general_sector_sentiment_1d,
     }
@@ -1550,9 +1583,307 @@ fn lookup_sector(ticker: &str) -> Option<String> {
     sector.map(str::to_string)
 }
 
+#[derive(Debug, Deserialize)]
+struct AlpacaLatestTradesResponse {
+    trades: HashMap<String, AlpacaTrade>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AlpacaTrade {
+    p: f64, // latest trade price
+    t: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AlpacaBarsResponse {
+    symbol: String,
+    bars: Vec<AlpacaBar>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct AlpacaBar {
+    t: String,
+    o: f64,
+    h: f64,
+    l: f64,
+    c: f64,
+    v: u64,
+}
+
+#[derive(Debug)]
+struct AlpacaStockMetrics {
+    current_price: f64,
+    peak_price_30d: f64,
+    return_1d: f64,
+    volatility_1d: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct AlpacaSnapshot {
+    #[serde(rename = "latestTrade")]
+    latest_trade: Option<AlpacaTrade>,
+
+    #[serde(rename = "prevDailyBar")]
+    prev_daily_bar: Option<AlpacaSnapshotBar>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AlpacaSnapshotBar {
+    c: f64,
+}
+
+async fn fetch_return_1d_from_snapshot(
+    symbol: &str,
+    client: &Client,
+) -> Result<f64, Box<dyn std::error::Error>> {
+    let api_key = std::env::var("APCA_API_KEY_ID")?;
+    let api_secret = std::env::var("APCA_API_SECRET_KEY")?;
+
+    let snapshot: AlpacaSnapshot = client
+        .get(format!(
+            "https://data.alpaca.markets/v2/stocks/{}/snapshot",
+            symbol
+        ))
+        .header("APCA-API-KEY-ID", &api_key)
+        .header("APCA-API-SECRET-KEY", &api_secret)
+        .query(&[("feed", "iex")])
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    let latest_price = snapshot
+        .latest_trade
+        .ok_or_else(|| format!("No latest trade for {}", symbol))?
+        .p;
+
+    let prev_close = snapshot
+        .prev_daily_bar
+        .ok_or_else(|| format!("No previous daily bar for {}", symbol))?
+        .c;
+
+    if prev_close <= 0.0 {
+        return Err(format!("Invalid previous close for {}", symbol).into());
+    }
+
+    Ok((latest_price / prev_close) - 1.0)
+}
+
+fn lookup_sector_benchmark_symbol(ticker: &str, sector: Option<&str>) -> Option<&'static str> {
+    let normalized = ticker.trim().trim_start_matches('$').to_ascii_uppercase();
+
+    match normalized.as_str() {
+        // broad / sector ETFs map to themselves or nearest benchmark
+        "SPY" | "VOO" | "IVV" => return Some("SPY"),
+        "QQQ" | "TQQQ" | "SQQQ" => return Some("QQQ"),
+        "DIA" => return Some("DIA"),
+        "IWM" => return Some("IWM"),
+        "SMH" | "SOXX" | "SOXL" | "SOXS" => return Some("SOXX"),
+        "XLF" => return Some("XLF"),
+        "XLK" => return Some("XLK"),
+        "XLE" => return Some("XLE"),
+        "XLI" => return Some("XLI"),
+        "XLV" => return Some("XLV"),
+        "XLP" => return Some("XLP"),
+        "XLY" => return Some("XLY"),
+        "XLB" => return Some("XLB"),
+        "XLU" => return Some("XLU"),
+        "XLRE" | "VNQ" => return Some("XLRE"),
+        "ARKK" => return Some("ARKK"),
+        "BITO" | "IBIT" | "FBTC" => return Some("IBIT"),
+        _ => {}
+    }
+
+    match sector {
+        Some("Consumer Electronics")
+        | Some("Software")
+        | Some("Computer Hardware")
+        | Some("IT Services") => Some("XLK"),
+
+        Some("Internet Services")
+        | Some("Social Media")
+        | Some("Streaming Media")
+        | Some("Telecommunications") => Some("XLC"),
+
+        Some("E-Commerce and Cloud")
+        | Some("Electric Vehicles")
+        | Some("Ride Sharing")
+        | Some("Travel Services")
+        | Some("Retail")
+        | Some("Home Improvement Retail")
+        | Some("Apparel")
+        | Some("Restaurants")
+        | Some("Media and Entertainment")
+        | Some("Cruise Lines")
+        | Some("Hotels") => Some("XLY"),
+
+        Some("Beverages")
+        | Some("Household Products") => Some("XLP"),
+
+        Some("Banks")
+        | Some("Asset Management")
+        | Some("Payment Processing")
+        | Some("Brokerage and Crypto Services")
+        | Some("Diversified Financial Services") => Some("XLF"),
+
+        Some("Weight Loss and Diabetes Treatments")
+        | Some("Pharmaceuticals")
+        | Some("Biotechnology")
+        | Some("Managed Care")
+        | Some("Medical Devices") => Some("XLV"),
+
+        Some("Oil and Gas")
+        | Some("Oilfield Services") => Some("XLE"),
+
+        Some("Heavy Machinery")
+        | Some("Aerospace and Defense")
+        | Some("Industrial Equipment")
+        | Some("Transportation and Logistics") => Some("XLI"),
+
+        Some("Steel")
+        | Some("Copper Mining")
+        | Some("Gold Mining") => Some("XLB"),
+
+        Some("Utilities") => Some("XLU"),
+
+        Some("Cell Towers")
+        | Some("Real Estate") => Some("XLRE"),
+
+        Some("Semiconductors")
+        | Some("Semiconductor ETF") => Some("SOXX"),
+
+        Some("Bitcoin Treasury")
+        | Some("Bitcoin Mining")
+        | Some("Bitcoin ETF") => Some("IBIT"),
+
+        Some("Broad Market ETF") => Some("SPY"),
+        Some("Nasdaq 100 ETF") => Some("QQQ"),
+        Some("Dow Jones ETF") => Some("DIA"),
+        Some("Small-Cap ETF") => Some("IWM"),
+        Some("Financials ETF") => Some("XLF"),
+        Some("Technology ETF") => Some("XLK"),
+        Some("Energy ETF") => Some("XLE"),
+        Some("Industrials ETF") => Some("XLI"),
+        Some("Healthcare ETF") => Some("XLV"),
+        Some("Consumer Staples ETF") => Some("XLP"),
+        Some("Consumer Discretionary ETF") => Some("XLY"),
+        Some("Materials ETF") => Some("XLB"),
+        Some("Utilities ETF") => Some("XLU"),
+        Some("Real Estate ETF") => Some("XLRE"),
+        Some("Disruptive Innovation ETF") => Some("ARKK"),
+
+        _ => None,
+    }
+}
+
+async fn fetch_alpaca_stock_metrics(
+    ticker: &str,
+    client: &Client,
+) -> Result<AlpacaStockMetrics, Box<dyn std::error::Error>> {
+    let api_key = std::env::var("APCA_API_KEY_ID")?;
+    let api_secret = std::env::var("APCA_API_SECRET_KEY")?;
+
+    let normalized_ticker = ticker.trim().trim_start_matches('$').to_ascii_uppercase();
+
+    let end = Utc::now().to_rfc3339();
+    let start = (Utc::now() - chrono::Duration::days(40)).to_rfc3339();
+
+    let latest_trade_fut = async {
+        let resp = client
+            .get("https://data.alpaca.markets/v2/stocks/trades/latest")
+            .header("APCA-API-KEY-ID", &api_key)
+            .header("APCA-API-SECRET-KEY", &api_secret)
+            .query(&[
+                ("symbols", normalized_ticker.as_str()),
+                ("feed", "iex"),
+            ])
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<AlpacaLatestTradesResponse>()
+            .await?;
+
+        Ok::<AlpacaLatestTradesResponse, reqwest::Error>(resp)
+    };
+
+    let bars_fut = async {
+        let resp = client
+            .get(format!(
+                "https://data.alpaca.markets/v2/stocks/{}/bars",
+                normalized_ticker
+            ))
+            .header("APCA-API-KEY-ID", &api_key)
+            .header("APCA-API-SECRET-KEY", &api_secret)
+            .query(&[
+                ("timeframe", "1Day"),
+                ("start", start.as_str()),
+                ("end", end.as_str()),
+                ("adjustment", "raw"),
+                ("feed", "iex"),
+                ("limit", "40"),
+            ])
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<AlpacaBarsResponse>()
+            .await?;
+
+        Ok::<AlpacaBarsResponse, reqwest::Error>(resp)
+    };
+
+    let (latest_trade_resp, bars_resp) = tokio::try_join!(latest_trade_fut, bars_fut)?;
+
+    let current_price = latest_trade_resp
+        .trades
+        .get(&normalized_ticker)
+        .map(|trade| trade.p)
+        .ok_or_else(|| format!("No latest trade returned for {}", normalized_ticker))?;
+
+    if bars_resp.bars.len() < 2 {
+        return Err(format!("Not enough bars returned for {}", normalized_ticker).into());
+    }
+
+    let closes: Vec<f64> = bars_resp.bars.iter().map(|bar| bar.c).collect();
+
+    let prev_close = closes[closes.len() - 2];
+    let return_1d = (current_price / prev_close) - 1.0;
+
+    let peak_price_30d = bars_resp
+        .bars
+        .iter()
+        .map(|bar| bar.h)
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    let log_returns: Vec<f64> = closes
+        .windows(2)
+        .map(|window| (window[1] / window[0]).ln())
+        .collect();
+
+    let volatility_1d = if log_returns.len() <= 1 {
+        0.0
+    } else {
+        let mean = log_returns.iter().sum::<f64>() / log_returns.len() as f64;
+        let variance = log_returns
+            .iter()
+            .map(|r| (r - mean).powi(2))
+            .sum::<f64>()
+            / (log_returns.len() as f64 - 1.0);
+
+        variance.sqrt()
+    };
+
+    Ok(AlpacaStockMetrics {
+        current_price,
+        peak_price_30d,
+        return_1d,
+        volatility_1d,
+    })
+}
+
 #[tokio::main]
 async fn main() {
-    let ticker = "AAPL";
+    let ticker = "TSLA";
     let data = gather_data(ticker).await;
 
     println!("ML Data for {}: {:#?}", ticker, data);
