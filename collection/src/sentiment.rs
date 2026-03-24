@@ -368,7 +368,7 @@ fn normalize_headline_key(title: &str) -> String {
         .join(" ")
 }
 
-fn article_sentiment(article: &GoogleArticle) -> f64 {
+pub fn article_sentiment(article: &GoogleArticle) -> f64 {
     let title_sentiment = sentiment_analysis(&article.title);
     let description_sentiment = article
         .description

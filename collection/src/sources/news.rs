@@ -1,4 +1,5 @@
 use chrono::Utc;
+use chrono_tz::America::New_York;
 use reqwest::{Client, RequestBuilder};
 use rss::{Channel, Item};
 use scraper::Html;
@@ -67,7 +68,10 @@ pub async fn fetch_nasdaq_trade_halt(
     feed_url: &str,
 ) -> AppResult<Vec<NasdaqTradeHalt>> {
     let channel = read_channel(client, feed_url, None).await?;
-    let today = Utc::now().format("%m/%d/%Y").to_string();
+    let today = Utc::now()
+        .with_timezone(&New_York)
+        .format("%m/%d/%Y")
+        .to_string();
 
     Ok(channel
         .items()
@@ -112,10 +116,6 @@ pub async fn fetch_google_news(url: &str, client: &Client) -> AppResult<Vec<Goog
             })
         })
         .collect();
-
-    if articles.is_empty() {
-        return Err(std::io::Error::other("No Google News stories found").into());
-    }
 
     Ok(articles)
 }

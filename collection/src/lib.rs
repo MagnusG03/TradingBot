@@ -10,11 +10,17 @@ pub type AppResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 pub use client::build_client;
 pub use collectors::collect_ml_data;
-pub use sources::{fetch_alpaca_stock_metrics, fetch_return_1d_from_snapshot};
+pub use sources::{
+    DailyBar, PriceFrame, StockSnapshot, fetch_alpaca_stock_metrics, fetch_daily_bars,
+    fetch_price_frame, fetch_return_1d_from_snapshot, fetch_stock_snapshot,
+};
 pub use sector_lookup::{lookup_sector, lookup_sector_benchmark_symbol};
-pub use sentiment::{average_article_sentiment, sentiment_analysis};
+pub use sentiment::{article_sentiment, average_article_sentiment, sentiment_analysis};
 pub use types::{
-    AlpacaStockMetrics, GlobeNewswireRelease, GoogleArticle, KalshiPrediction, MLData,
-    NasdaqTradeHalt, PolymarketPrediction, PrNewswireRelease, SecFiling,
+    AggregatorInput, AlpacaStockMetrics, EarningsSpecialistInput, GeneralistInput,
+    GlobeNewswireRelease, GoogleArticle, KalshiPrediction, MLData, MarketRegime,
+    MarketSession, NasdaqTradeHalt, NewsCategory, NewsEventSpecialistInput,
+    PolymarketPrediction, PrNewswireRelease, RegimeSpecialistInput, SecFiling,
+    SharedContext, TechnicalSpecialistInput,
 };
 pub use utils::{normalize_ticker, parse_datetime_to_utc, parse_filing_datetime};
