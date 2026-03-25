@@ -1,0 +1,164 @@
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import Model, layers, Input
+import numpy as np
+
+#Generalist model
+inp = Input(shape=(60,))
+
+x = layers.Dense(128, activation='relu')(inp)
+x = layers.Dense(64, activation='relu')(x)
+
+expected_excess_return_7d = layers.Dense(1, activation='linear', name='expected_excess_return_7d')(x)
+prob_outperform_7d = layers.Dense(1, activation='sigmoid', name='prob_outperform_7d')(x)
+
+generalist = Model(inputs=inp, outputs=[expected_excess_return_7d, prob_outperform_7d])
+
+generalist.compile(
+    optimizer='adam',
+    loss={
+        'expected_excess_return_7d': 'mse',
+        'prob_outperform_7d': 'binary_crossentropy'
+    },
+    loss_weights={
+        'expected_excess_return_7d': 1.0,
+        'prob_outperform_7d': 0.5
+    }
+)
+
+#Technical specialist model
+inp = Input(shape=(60,))
+
+x = layers.Dense(128, activation='relu')(inp)
+x = layers.Dense(64, activation='relu')(x)
+
+expected_excess_return_7d = layers.Dense(1, activation='linear', name='expected_excess_return_7d')(x)
+prob_outperform_7d = layers.Dense(1, activation='sigmoid', name='prob_outperform_7d')(x)
+
+technical = Model(inputs=inp, outputs=[expected_excess_return_7d, prob_outperform_7d])
+
+technical.compile(
+    optimizer='adam',
+    loss={
+        'expected_excess_return_7d': 'mse',
+        'prob_outperform_7d': 'binary_crossentropy'
+    },
+    loss_weights={
+        'expected_excess_return_7d': 1.0,
+        'prob_outperform_7d': 0.5
+    }
+)
+
+#Earnings specialist model
+inp = Input(shape=(35,))
+
+x = layers.Dense(128, activation='relu')(inp)
+x = layers.Dense(64, activation='relu')(x)
+
+expected_excess_return_7d = layers.Dense(1, activation='linear', name='expected_excess_return_7d')(x)
+prob_outperform_7d = layers.Dense(1, activation='sigmoid', name='prob_outperform_7d')(x)
+
+earnings = Model(inputs=inp, outputs=[expected_excess_return_7d, prob_outperform_7d])
+
+earnings.compile(
+    optimizer='adam',
+    loss={
+        'expected_excess_return_7d': 'mse',
+        'prob_outperform_7d': 'binary_crossentropy'
+    },
+    loss_weights={
+        'expected_excess_return_7d': 1.0,
+        'prob_outperform_7d': 0.5
+    }
+)
+
+#News specialist model
+inp = Input(shape=(37,))
+
+x = layers.Dense(128, activation='relu')(inp)
+x = layers.Dense(64, activation='relu')(x)
+
+expected_excess_return_7d = layers.Dense(1, activation='linear', name='expected_excess_return_7d')(x)
+prob_outperform_7d = layers.Dense(1, activation='sigmoid', name='prob_outperform_7d')(x)
+prob_large_move_7d = layers.Dense(1, activation='sigmoid', name='prob_large_move_7d')(x)
+
+news = Model(inputs=inp, outputs=[expected_excess_return_7d, prob_outperform_7d, prob_large_move_7d])
+
+news.compile(
+    optimizer='adam',
+    loss={
+        'expected_excess_return_7d': 'mse',
+        'prob_outperform_7d': 'binary_crossentropy',
+        'prob_large_move_7d': 'binary_crossentropy'
+    },
+    loss_weights={
+        'expected_excess_return_7d': 1.0,
+        'prob_outperform_7d': 0.5,
+        'prob_large_move_7d': 0.5
+    }
+)
+
+#Regime specialist model
+inp = Input(shape=(25,))
+
+x = layers.Dense(128, activation='relu')(inp)
+x = layers.Dense(64, activation='relu')(x)
+
+prob_signal_friendly = layers.Dense(1, activation='sigmoid', name='prob_signal_friendly')(x)
+prob_risk_on = layers.Dense(1, activation='sigmoid', name='prob_risk_on')(x)
+
+regime = Model(inputs=inp, outputs=[prob_signal_friendly, prob_risk_on])
+
+regime.compile(
+    optimizer='adam',
+    loss={
+        'prob_signal_friendly': 'binary_crossentropy',
+        'prob_risk_on': 'binary_crossentropy'
+    },
+    loss_weights={
+        'prob_signal_friendly': 0.5,
+        'prob_risk_on': 0.5
+    }
+)
+
+#Aggregation model
+inp_meta = Input(shape=(17,))
+inp_generalist = Input(shape=(2,))
+inp_technical = Input(shape=(2,))
+inp_earnings = Input(shape=(2,))
+inp_news = Input(shape=(3,))
+inp_regime = Input(shape=(2,))
+
+x = layers.Concatenate()([inp_meta, inp_generalist, inp_technical, inp_earnings, inp_news, inp_regime])
+
+x = layers.Dense(64, activation='relu')(x)
+x = layers.Dense(32, activation='relu')(x)
+
+expected_excess_return_7d = layers.Dense(1, activation='linear', name='expected_excess_return_7d')(x)
+prob_outperform_7d = layers.Dense(1, activation='sigmoid', name='prob_outperform_7d')(x)
+prob_tradeable_long_7d = layers.Dense(1, activation='sigmoid', name='prob_tradeable_long_7d')(x)
+prob_tradeable_short_7d = layers.Dense(1, activation='sigmoid', name='prob_tradeable_short_7d')(x)
+prob_large_move_7d = layers.Dense(1, activation='sigmoid', name='prob_large_move_7d')(x)
+predicted_volatility_7d = layers.Dense(1, activation='softplus', name='predicted_volatility_7d')(x)
+
+aggregation = Model(inputs=[inp_meta, inp_generalist, inp_technical, inp_earnings, inp_news, inp_regime], outputs=[expected_excess_return_7d, prob_outperform_7d, prob_tradeable_long_7d, prob_tradeable_short_7d, prob_large_move_7d, predicted_volatility_7d])
+
+aggregation.compile(
+    optimizer='adam',
+    loss={
+        'expected_excess_return_7d': 'mse',
+        'prob_outperform_7d': 'binary_crossentropy',
+        'prob_tradeable_long_7d': 'binary_crossentropy',
+        'prob_tradeable_short_7d': 'binary_crossentropy',
+        'prob_large_move_7d': 'binary_crossentropy',
+        'predicted_volatility_7d': 'mse',
+    },
+    loss_weights={
+        'expected_excess_return_7d': 1.0,
+        'prob_outperform_7d': 0.5,
+        'prob_tradeable_long_7d': 0.5,
+        'prob_tradeable_short_7d': 0.5,
+        'prob_large_move_7d': 0.5,
+        'predicted_volatility_7d': 1.0,
+    }
+)

@@ -5,6 +5,7 @@ pub struct MLData {
     pub earnings: EarningsSpecialistInput,
     pub news_event: NewsEventSpecialistInput,
     pub regime: RegimeSpecialistInput,
+    pub aggregator: AggregatorInput,
 }
 
 #[derive(Debug, Clone)]
@@ -285,27 +286,6 @@ pub struct RegimeSpecialistInput {
 #[derive(Debug, Clone)]
 pub struct AggregatorInput {
     pub ctx: SharedContext,
-
-    pub generalist_expected_excess_return_7d: f32,
-    pub generalist_prob_outperform_7d: f32,
-    pub generalist_confidence: f32,
-
-    pub technical_expected_excess_return_7d: f32,
-    pub technical_prob_outperform_7d: f32,
-    pub technical_confidence: f32,
-
-    pub earnings_expected_excess_return_7d: f32,
-    pub earnings_prob_outperform_7d: f32,
-    pub earnings_confidence: f32,
-
-    pub news_expected_excess_return_7d: f32,
-    pub news_prob_outperform_7d: f32,
-    pub news_prob_large_move_7d: f32,
-    pub news_confidence: f32,
-
-    pub regime_prob_risk_on: f32,
-    pub regime_prob_signal_friendly: f32,
-    pub regime_confidence: f32,
 
     pub market_regime: MarketRegime,
     pub missing_feature_fraction: f32,

@@ -12,9 +12,9 @@ use crate::{
         fetch_sec_edgar_ticker,
     },
     types::{
-        EarningsSpecialistInput, GeneralistInput, GoogleArticle, MLData, MarketRegime,
-        MarketSession, NewsCategory, NewsEventSpecialistInput, RegimeSpecialistInput, SecFiling,
-        SharedContext, TechnicalSpecialistInput,
+        AggregatorInput, EarningsSpecialistInput, GeneralistInput, GoogleArticle, MLData,
+        MarketRegime, MarketSession, NewsCategory, NewsEventSpecialistInput,
+        RegimeSpecialistInput, SecFiling, SharedContext, TechnicalSpecialistInput,
     },
     utils::{normalize_ticker, parse_datetime_to_utc, parse_filing_datetime},
 };
@@ -461,7 +461,7 @@ pub async fn collect_ml_data(ticker: &str) -> MLData {
             excess_return_vs_benchmark_1d: as_f32(relative_features.excess_return_vs_benchmark_1d),
         },
         regime: RegimeSpecialistInput {
-            ctx: shared_context,
+            ctx: shared_context.clone(),
             spy_return_1d: as_f32(relative_features.spy_return_1d),
             spy_return_5d: as_f32(relative_features.spy_return_5d),
             qqq_return_1d: as_f32(relative_features.qqq_return_1d),
@@ -473,6 +473,12 @@ pub async fn collect_ml_data(ticker: &str) -> MLData {
             idiosyncratic_vol_20d: as_f32(relative_features.idiosyncratic_vol_20d),
             market_regime,
             regime_confidence,
+        },
+        aggregator: AggregatorInput {
+            ctx: shared_context,
+            market_regime,
+            missing_feature_fraction: quality.missing_feature_fraction,
+            data_quality_score: quality.data_quality_score,
         },
     }
 }
