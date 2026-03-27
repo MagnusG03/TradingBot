@@ -22,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("artifacts"),
+        default=Path("models"),
         help="Directory where trained .keras models will be written.",
     )
     return parser.parse_args()
