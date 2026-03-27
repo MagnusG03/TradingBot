@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{NaiveDate, Utc};
 use chrono_tz::America::New_York;
 use reqwest::{Client, RequestBuilder};
 use rss::{Channel, Item};
@@ -10,6 +10,7 @@ use crate::{
 };
 
 const GOOGLE_NEWS_REFERER: &str = "https://news.google.com/";
+const GOOGLE_NEWS_BASE_URL: &str = "https://news.google.com/rss/search";
 
 pub async fn fetch_prnewswire(
     client: &Client,
@@ -98,6 +99,36 @@ pub async fn fetch_nasdaq_trade_halt(
         .collect())
 }
 
+pub async fn fetch_nasdaq_trade_halts_for_date(
+    client: &Client,
+    date: NaiveDate,
+) -> AppResult<Vec<NasdaqTradeHalt>> {
+    let feed_url = format!(
+        "https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts&haltdate={}",
+        date.format("%m%d%Y")
+    );
+    let channel = read_channel(client, &feed_url, None).await?;
+
+    Ok(channel
+        .items()
+        .iter()
+        .filter_map(|item| {
+            Some(NasdaqTradeHalt {
+                ticker: get_ndaq_field(item, "IssueSymbol")?,
+                company_name: get_ndaq_field(item, "IssueName")?,
+                market: get_ndaq_field(item, "Market")?,
+                halt_date: get_ndaq_field(item, "HaltDate")?,
+                halt_time: get_ndaq_field(item, "HaltTime")?,
+                reason: get_ndaq_field(item, "ReasonCode")?,
+                resumption_date: get_ndaq_field(item, "ResumptionDate"),
+                resumption_quote_time: get_ndaq_field(item, "ResumptionQuoteTime"),
+                resumption_trade_time: get_ndaq_field(item, "ResumptionTradeTime"),
+                pause_threshold_price: get_ndaq_field(item, "PauseThresholdPrice"),
+            })
+        })
+        .collect())
+}
+
 pub async fn fetch_google_news(url: &str, client: &Client) -> AppResult<Vec<GoogleArticle>> {
     let channel = read_channel(client, &url, Some(GOOGLE_NEWS_REFERER)).await?;
     let articles: Vec<GoogleArticle> = channel
@@ -118,6 +149,23 @@ pub async fn fetch_google_news(url: &str, client: &Client) -> AppResult<Vec<Goog
         .collect();
 
     Ok(articles)
+}
+
+pub async fn fetch_google_news_range(
+    query: &str,
+    after: NaiveDate,
+    before: NaiveDate,
+    client: &Client,
+) -> AppResult<Vec<GoogleArticle>> {
+    let encoded_query = format!(
+        "{}+after%3A{}+before%3A{}",
+        query.trim().replace(' ', "+"),
+        after.format("%Y-%m-%d"),
+        before.format("%Y-%m-%d"),
+    );
+    let url = format!("{GOOGLE_NEWS_BASE_URL}?q={encoded_query}&hl=en-US&gl=US&ceid=US%3Aen");
+
+    fetch_google_news(&url, client).await
 }
 
 async fn read_channel(client: &Client, url: &str, referer: Option<&str>) -> AppResult<Channel> {

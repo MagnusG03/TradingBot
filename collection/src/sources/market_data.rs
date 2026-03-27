@@ -4,8 +4,8 @@ use serde::Deserialize;
 
 use crate::{AppResult, types::AlpacaStockMetrics, utils::normalize_ticker};
 
-const HISTORY_LOOKBACK_DAYS: i64 = 240;
-const HISTORY_LIMIT: &str = "180";
+const HISTORY_LOOKBACK_DAYS: i64 = 450;
+const HISTORY_LIMIT: &str = "360";
 
 #[derive(Debug, Clone)]
 pub struct DailyBar {
@@ -158,7 +158,9 @@ pub async fn fetch_daily_bars(symbol: &str, client: &Client) -> AppResult<Vec<Da
     let end = (now - Duration::days(1)).to_rfc3339();
 
     let response: BarsResponse = with_alpaca_auth(
-        client.get(format!("https://data.alpaca.markets/v2/stocks/{symbol}/bars")),
+        client.get(format!(
+            "https://data.alpaca.markets/v2/stocks/{symbol}/bars"
+        )),
         &api_key,
         &api_secret,
     )

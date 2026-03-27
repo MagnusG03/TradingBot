@@ -1,4 +1,6 @@
-#[derive(Debug, Clone)]
+use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize)]
 pub struct MLData {
     pub generalist: GeneralistInput,
     pub technical: TechnicalSpecialistInput,
@@ -8,14 +10,75 @@ pub struct MLData {
     pub aggregator: AggregatorInput,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+pub struct MLTrainingTargets {
+    pub future_return_7d: f32,
+    pub future_benchmark_return_7d: f32,
+    pub future_qqq_return_7d: f32,
+    pub expected_excess_return_7d: f32,
+    pub prob_outperform_7d: bool,
+    pub prob_large_move_7d: bool,
+    pub prob_signal_friendly: bool,
+    pub prob_risk_on: bool,
+    pub prob_tradeable_long_7d: bool,
+    pub prob_tradeable_short_7d: bool,
+    pub predicted_volatility_7d: f32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MLTrainingRecord {
+    pub ticker: String,
+    pub as_of_date: String,
+    pub as_of_timestamp_utc: i64,
+    pub generalist: GeneralistInput,
+    pub technical: TechnicalSpecialistInput,
+    pub earnings: EarningsSpecialistInput,
+    pub news_event: NewsEventSpecialistInput,
+    pub regime: RegimeSpecialistInput,
+    pub aggregator: AggregatorInput,
+    pub targets: MLTrainingTargets,
+}
+
+impl MLTrainingRecord {
+    pub fn from_ml_data(
+        ticker: String,
+        as_of_date: String,
+        as_of_timestamp_utc: i64,
+        data: MLData,
+        targets: MLTrainingTargets,
+    ) -> Self {
+        let MLData {
+            generalist,
+            technical,
+            earnings,
+            news_event,
+            regime,
+            aggregator,
+        } = data;
+
+        Self {
+            ticker,
+            as_of_date,
+            as_of_timestamp_utc,
+            generalist,
+            technical,
+            earnings,
+            news_event,
+            regime,
+            aggregator,
+            targets,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct PolymarketPrediction {
     pub question: String,
     pub outcomes: Vec<String>,
     pub outcome_prices: Vec<f64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct KalshiPrediction {
     pub title: String,
     pub subtitle: Option<String>,
@@ -23,7 +86,7 @@ pub struct KalshiPrediction {
     pub no_price: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SecFiling {
     pub ticker: String,
     pub company_name: String,
@@ -39,7 +102,7 @@ pub struct SecFiling {
     pub filing_url: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PrNewswireRelease {
     pub title: String,
     pub source_section: String,
@@ -48,7 +111,7 @@ pub struct PrNewswireRelease {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GlobeNewswireRelease {
     pub feed_name: String,
     pub title: String,
@@ -58,7 +121,7 @@ pub struct GlobeNewswireRelease {
     pub categories: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct NasdaqTradeHalt {
     pub ticker: String,
     pub company_name: String,
@@ -72,7 +135,7 @@ pub struct NasdaqTradeHalt {
     pub pause_threshold_price: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GoogleArticle {
     pub title: String,
     pub link: String,
@@ -80,7 +143,7 @@ pub struct GoogleArticle {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct AlpacaStockMetrics {
     pub current_price: f64,
     pub peak_price_30d: f64,
@@ -88,7 +151,7 @@ pub struct AlpacaStockMetrics {
     pub volatility_1d: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct GeneralistInput {
     pub ctx: SharedContext,
 
@@ -146,7 +209,7 @@ pub struct GeneralistInput {
     pub has_high_impact_news_24h: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TechnicalSpecialistInput {
     pub ctx: SharedContext,
 
@@ -203,7 +266,7 @@ pub struct TechnicalSpecialistInput {
     pub volume_trend_5d: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct EarningsSpecialistInput {
     pub ctx: SharedContext,
 
@@ -232,7 +295,7 @@ pub struct EarningsSpecialistInput {
     pub has_high_impact_news_24h: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct NewsEventSpecialistInput {
     pub ctx: SharedContext,
 
@@ -264,7 +327,7 @@ pub struct NewsEventSpecialistInput {
     pub excess_return_vs_benchmark_1d: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RegimeSpecialistInput {
     pub ctx: SharedContext,
 
@@ -283,7 +346,7 @@ pub struct RegimeSpecialistInput {
     pub regime_confidence: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AggregatorInput {
     pub ctx: SharedContext,
 
@@ -292,7 +355,7 @@ pub struct AggregatorInput {
     pub data_quality_score: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SharedContext {
     pub timestamp_utc: i64,
     pub market_session: MarketSession,
@@ -313,7 +376,7 @@ pub struct SharedContext {
     pub data_quality_score: f32,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
 pub enum MarketSession {
     PreMarket,
     Regular,
@@ -321,7 +384,7 @@ pub enum MarketSession {
     Closed,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
 pub enum MarketRegime {
     RiskOn,
     RiskOff,
@@ -331,7 +394,7 @@ pub enum MarketRegime {
     MeanReversion,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
 pub enum NewsCategory {
     None,
     Earnings,

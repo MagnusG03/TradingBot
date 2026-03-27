@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use atom_syndication::{Entry, Feed};
+use chrono::NaiveDate;
 use reqwest::Client;
 use serde::Deserialize;
 
@@ -17,6 +18,8 @@ struct SecSubmissions {
 #[derive(Debug, Deserialize)]
 struct SecFilings {
     recent: SecRecentFilings,
+    #[serde(default)]
+    files: Vec<SecHistoricalFile>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,6 +48,15 @@ struct CompanyTickerEntry {
     cik_str: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct SecHistoricalFile {
+    name: String,
+    #[serde(rename = "filingFrom", default)]
+    filing_from: String,
+    #[serde(rename = "filingTo", default)]
+    filing_to: String,
+}
+
 pub async fn fetch_sec_edgar_all(identifier: &str, client: &Client) -> AppResult<Vec<SecFiling>> {
     let feed_url = identifier.to_string();
 
@@ -64,6 +76,14 @@ pub async fn fetch_sec_edgar_all(identifier: &str, client: &Client) -> AppResult
 }
 
 pub async fn fetch_sec_edgar_ticker(ticker: &str, client: &Client) -> AppResult<Vec<SecFiling>> {
+    fetch_sec_edgar_ticker_since(ticker, client, None).await
+}
+
+pub async fn fetch_sec_edgar_ticker_since(
+    ticker: &str,
+    client: &Client,
+    min_date: Option<NaiveDate>,
+) -> AppResult<Vec<SecFiling>> {
     let cik = lookup_sec_cik(ticker, client).await?;
     let submissions: SecSubmissions = client
         .get(format!("https://data.sec.gov/submissions/CIK{cik}.json"))
@@ -73,22 +93,51 @@ pub async fn fetch_sec_edgar_ticker(ticker: &str, client: &Client) -> AppResult<
         .json()
         .await?;
 
-    let company_name = submissions.name;
-    let recent = submissions.filings.recent;
-    let canonical_ticker = submissions
-        .tickers
+    let SecSubmissions {
+        name: company_name,
+        tickers,
+        filings,
+    } = submissions;
+    let SecFilings { recent, files } = filings;
+    let canonical_ticker = tickers
         .first()
         .cloned()
         .unwrap_or_else(|| normalize_ticker(ticker));
+    let mut filings =
+        build_submission_filings(&recent, &company_name, &canonical_ticker, &cik, min_date);
 
-    Ok(recent
-        .forms
-        .iter()
-        .enumerate()
-        .filter_map(|(index, form)| {
-            build_submission_filing(index, form, &recent, &company_name, &canonical_ticker, &cik)
-        })
-        .collect())
+    for file in files {
+        if historical_file_is_older_than(&file, min_date) {
+            continue;
+        }
+
+        let historical: SecRecentFilings = client
+            .get(format!("https://data.sec.gov/submissions/{}", file.name))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        filings.extend(build_submission_filings(
+            &historical,
+            &company_name,
+            &canonical_ticker,
+            &cik,
+            min_date,
+        ));
+    }
+
+    let mut seen = HashSet::new();
+    filings.retain(|filing| seen.insert(filing.accession_number.clone()));
+    filings.sort_by(|left, right| {
+        right
+            .filing_date
+            .cmp(&left.filing_date)
+            .then_with(|| right.acceptance_datetime.cmp(&left.acceptance_datetime))
+    });
+
+    Ok(filings)
 }
 
 pub async fn lookup_sec_cik(ticker: &str, client: &Client) -> AppResult<String> {
@@ -143,6 +192,24 @@ fn build_submission_filing(
         is_inline_xbrl: recent.is_inline_xbrl.get(index).copied().unwrap_or(0) != 0,
         filing_url,
     })
+}
+
+fn build_submission_filings(
+    filings: &SecRecentFilings,
+    company_name: &str,
+    ticker: &str,
+    cik: &str,
+    min_date: Option<NaiveDate>,
+) -> Vec<SecFiling> {
+    filings
+        .forms
+        .iter()
+        .enumerate()
+        .filter_map(|(index, form)| {
+            build_submission_filing(index, form, filings, company_name, ticker, cik)
+        })
+        .filter(|filing| filing_matches_min_date(filing, min_date))
+        .collect()
 }
 
 fn parse_atom_entry(entry: &Entry, cik_to_ticker: &HashMap<String, String>) -> Option<SecFiling> {
@@ -241,4 +308,27 @@ async fn fetch_atom_feed(client: &Client, url: &str) -> AppResult<Feed> {
 
 fn non_empty_string(value: Option<&String>) -> Option<String> {
     value.cloned().filter(|value| !value.trim().is_empty())
+}
+
+fn filing_matches_min_date(filing: &SecFiling, min_date: Option<NaiveDate>) -> bool {
+    match min_date {
+        Some(min_date) => NaiveDate::parse_from_str(&filing.filing_date, "%Y-%m-%d")
+            .map(|date| date >= min_date)
+            .unwrap_or(true),
+        None => true,
+    }
+}
+
+fn historical_file_is_older_than(file: &SecHistoricalFile, min_date: Option<NaiveDate>) -> bool {
+    let Some(min_date) = min_date else {
+        return false;
+    };
+
+    let file_to = NaiveDate::parse_from_str(&file.filing_to, "%Y-%m-%d").ok();
+    let file_from = NaiveDate::parse_from_str(&file.filing_from, "%Y-%m-%d").ok();
+
+    matches!(
+        (file_from, file_to),
+        (Some(file_from), Some(file_to)) if file_from < min_date && file_to < min_date
+    )
 }

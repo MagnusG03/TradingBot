@@ -1,29 +1,29 @@
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Datelike, Duration, NaiveDate, Timelike, Utc, Weekday};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Timelike, Utc, Weekday};
 use chrono_tz::America::New_York;
 use reqwest::Client;
 
 use crate::{
-    AppResult, article_sentiment, build_client,
-    lookup_sector_benchmark_symbol,
+    AppResult, article_sentiment, build_client, lookup_sector_benchmark_symbol,
     sources::{
-        DailyBar, PriceFrame, fetch_google_news, fetch_nasdaq_trade_halt, fetch_price_frame,
-        fetch_sec_edgar_ticker,
+        DailyBar, PriceFrame, fetch_google_news, fetch_nasdaq_trade_halts_for_date,
+        fetch_price_frame, fetch_sec_edgar_ticker,
     },
     types::{
         AggregatorInput, EarningsSpecialistInput, GeneralistInput, GoogleArticle, MLData,
-        MarketRegime, MarketSession, NewsCategory, NewsEventSpecialistInput,
+        MarketRegime, MarketSession, NasdaqTradeHalt, NewsCategory, NewsEventSpecialistInput,
         RegimeSpecialistInput, SecFiling, SharedContext, TechnicalSpecialistInput,
     },
     utils::{normalize_ticker, parse_datetime_to_utc, parse_filing_datetime},
 };
 
-const BENCHMARK_SYMBOL: &str = "SPY";
-const QQQ_SYMBOL: &str = "QQQ";
-const TRADE_HALTS_URL: &str = "https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts";
-const REQUIRED_HISTORY_BARS: usize = 60;
-const GOOGLE_NEWS_QUERY_ITEM_CAP: usize = 100;
+pub(crate) const BENCHMARK_SYMBOL: &str = "SPY";
+pub(crate) const QQQ_SYMBOL: &str = "QQQ";
+pub(crate) const REQUIRED_HISTORY_BARS: usize = 60;
+pub(crate) const GOOGLE_NEWS_QUERY_ITEM_CAP: usize = 100;
+pub(crate) const CANONICAL_CLOSE_HOUR_ET: u32 = 16;
+pub(crate) const CANONICAL_CLOSE_MINUTE_ET: u32 = 0;
 const NEWS_TRUNCATION_QUALITY_PENALTY: f32 = 0.12;
 
 #[derive(Clone, Default)]
@@ -110,26 +110,26 @@ struct FilingFeatures {
 }
 
 #[derive(Clone)]
-struct NewsFeatures {
-    news_count_1h: u16,
-    news_count_6h: u16,
-    news_count_24h: u16,
-    news_count_3d: u16,
-    abnormal_news_count_6h: f64,
-    abnormal_news_count_24h: f64,
-    avg_news_sentiment_1h: f64,
-    avg_news_sentiment_6h: f64,
-    avg_news_sentiment_24h: f64,
-    sentiment_change_6h_vs_24h: f64,
-    sentiment_dispersion_24h: f64,
-    positive_news_ratio_24h: f64,
-    negative_news_ratio_24h: f64,
-    relevance_weighted_news_sentiment_24h: f64,
-    hours_since_latest_news: Option<f32>,
-    news_novelty_score_24h: Option<f32>,
-    dominant_news_category: NewsCategory,
-    has_high_impact_news_24h: bool,
-    source_truncated: bool,
+pub(crate) struct NewsFeatures {
+    pub(crate) news_count_1h: u16,
+    pub(crate) news_count_6h: u16,
+    pub(crate) news_count_24h: u16,
+    pub(crate) news_count_3d: u16,
+    pub(crate) abnormal_news_count_6h: f64,
+    pub(crate) abnormal_news_count_24h: f64,
+    pub(crate) avg_news_sentiment_1h: f64,
+    pub(crate) avg_news_sentiment_6h: f64,
+    pub(crate) avg_news_sentiment_24h: f64,
+    pub(crate) sentiment_change_6h_vs_24h: f64,
+    pub(crate) sentiment_dispersion_24h: f64,
+    pub(crate) positive_news_ratio_24h: f64,
+    pub(crate) negative_news_ratio_24h: f64,
+    pub(crate) relevance_weighted_news_sentiment_24h: f64,
+    pub(crate) hours_since_latest_news: Option<f32>,
+    pub(crate) news_novelty_score_24h: Option<f32>,
+    pub(crate) dominant_news_category: NewsCategory,
+    pub(crate) has_high_impact_news_24h: bool,
+    pub(crate) source_truncated: bool,
 }
 
 impl Default for NewsFeatures {
@@ -166,17 +166,17 @@ struct QualityMetrics {
 }
 
 #[derive(Clone, Copy, Default)]
-struct SourceAvailability {
-    ticker_frame: bool,
-    benchmark_frame: bool,
-    qqq_frame: bool,
-    sector_frame: bool,
-    filings: bool,
-    trade_halts: bool,
-    news_1h: bool,
-    news_6h: bool,
-    news_24h: bool,
-    news_3d: bool,
+pub(crate) struct SourceAvailability {
+    pub(crate) ticker_frame: bool,
+    pub(crate) benchmark_frame: bool,
+    pub(crate) qqq_frame: bool,
+    pub(crate) sector_frame: bool,
+    pub(crate) filings: bool,
+    pub(crate) trade_halts: bool,
+    pub(crate) news_1h: bool,
+    pub(crate) news_6h: bool,
+    pub(crate) news_24h: bool,
+    pub(crate) news_3d: bool,
 }
 
 impl SourceAvailability {
@@ -184,7 +184,7 @@ impl SourceAvailability {
         self.news_1h || self.news_6h || self.news_24h || self.news_3d
     }
 
-    fn success_count(self, has_sector_benchmark: bool) -> u32 {
+    pub(crate) fn success_count(self, has_sector_benchmark: bool) -> u32 {
         u32::from(self.ticker_frame)
             + u32::from(self.benchmark_frame)
             + u32::from(self.qqq_frame)
@@ -198,11 +198,32 @@ impl SourceAvailability {
     }
 }
 
+pub(crate) struct SampleSourceData<'a> {
+    pub(crate) now: DateTime<Utc>,
+    pub(crate) ticker: &'a str,
+    pub(crate) ticker_frame: &'a PriceFrame,
+    pub(crate) benchmark_frame: &'a PriceFrame,
+    pub(crate) qqq_frame: &'a PriceFrame,
+    pub(crate) sector_frame: &'a PriceFrame,
+    pub(crate) sector_available: bool,
+    pub(crate) has_sector_benchmark: bool,
+    pub(crate) filings: &'a [SecFiling],
+    pub(crate) trade_halts: &'a [NasdaqTradeHalt],
+    pub(crate) articles: &'a [GoogleArticle],
+    pub(crate) news_source_truncated: bool,
+    pub(crate) source_availability: SourceAvailability,
+}
+
 pub async fn collect_ml_data(ticker: &str) -> MLData {
+    collect_ml_data_now(ticker).await
+}
+
+pub async fn collect_ml_data_now(ticker: &str) -> MLData {
     let client = build_client();
     let normalized_ticker = normalize_ticker(ticker);
     let now = Utc::now();
     let sector_benchmark_symbol = lookup_sector_benchmark_symbol(&normalized_ticker, None);
+    let halt_date = now.with_timezone(&New_York).date_naive();
 
     let news_1h_url = build_ticker_news_url(&normalized_ticker, "1h");
     let news_6h_url = build_ticker_news_url(&normalized_ticker, "6h");
@@ -226,32 +247,28 @@ pub async fn collect_ml_data(ticker: &str) -> MLData {
         fetch_price_frame(QQQ_SYMBOL, &client),
         fetch_optional_price_frame(sector_benchmark_symbol, &client),
         fetch_sec_edgar_ticker(&normalized_ticker, &client),
-        fetch_nasdaq_trade_halt(&client, TRADE_HALTS_URL),
+        fetch_nasdaq_trade_halts_for_date(&client, halt_date),
         fetch_google_news(&news_1h_url, &client),
         fetch_google_news(&news_6h_url, &client),
         fetch_google_news(&news_24h_url, &client),
         fetch_google_news(&news_3d_url, &client),
     );
 
-    let source_availability = SourceAvailability {
-        ticker_frame: ticker_frame_result.is_ok(),
-        benchmark_frame: benchmark_frame_result.is_ok(),
-        qqq_frame: qqq_frame_result.is_ok(),
-        sector_frame: matches!(sector_frame_result, Ok(Some(_))),
-        filings: filings_result.is_ok(),
-        trade_halts: trade_halts_result.is_ok(),
-        news_1h: news_1h_result.is_ok(),
-        news_6h: news_6h_result.is_ok(),
-        news_24h: news_24h_result.is_ok(),
-        news_3d: news_3d_result.is_ok(),
-    };
-    let source_successes = source_availability.success_count(sector_benchmark_symbol.is_some());
-    let source_targets = 9 + u32::from(sector_benchmark_symbol.is_some());
+    let ticker_frame_available = ticker_frame_result.is_ok();
+    let benchmark_frame_available = benchmark_frame_result.is_ok();
+    let qqq_frame_available = qqq_frame_result.is_ok();
+    let sector_frame_available = matches!(sector_frame_result.as_ref(), Ok(Some(_)));
+    let filings_available = filings_result.is_ok();
+    let trade_halts_available = trade_halts_result.is_ok();
+    let news_1h_available = news_1h_result.is_ok();
+    let news_6h_available = news_6h_result.is_ok();
+    let news_24h_available = news_24h_result.is_ok();
+    let news_3d_available = news_3d_result.is_ok();
 
     let ticker_frame = ticker_frame_result.unwrap_or_default();
     let benchmark_frame = benchmark_frame_result.unwrap_or_default();
     let qqq_frame = qqq_frame_result.unwrap_or_default();
-    let sector_available = matches!(sector_frame_result, Ok(Some(_)));
+    let sector_available = sector_frame_available;
     let sector_frame = match sector_frame_result {
         Ok(Some(frame)) => frame,
         _ => PriceFrame::default(),
@@ -262,8 +279,124 @@ pub async fn collect_ml_data(ticker: &str) -> MLData {
     let news_6h = news_6h_result.unwrap_or_default();
     let news_24h = news_24h_result.unwrap_or_default();
     let news_3d = news_3d_result.unwrap_or_default();
+    let articles = merged_news_articles(&[&news_1h, &news_6h, &news_24h, &news_3d]);
+    let source_availability = SourceAvailability {
+        ticker_frame: ticker_frame_available,
+        benchmark_frame: benchmark_frame_available,
+        qqq_frame: qqq_frame_available,
+        sector_frame: sector_frame_available,
+        filings: filings_available,
+        trade_halts: trade_halts_available,
+        news_1h: news_1h_available,
+        news_6h: news_6h_available,
+        news_24h: news_24h_available,
+        news_3d: news_3d_available,
+    };
 
-    let price_features = derive_price_features(&ticker_frame);
+    build_ml_data_from_source_data(&SampleSourceData {
+        now,
+        ticker: &normalized_ticker,
+        ticker_frame: &ticker_frame,
+        benchmark_frame: &benchmark_frame,
+        qqq_frame: &qqq_frame,
+        sector_frame: &sector_frame,
+        sector_available,
+        has_sector_benchmark: sector_benchmark_symbol.is_some(),
+        filings: &filings,
+        trade_halts: &trade_halts,
+        articles: &articles,
+        news_source_truncated: news_24h.len() >= GOOGLE_NEWS_QUERY_ITEM_CAP
+            || news_3d.len() >= GOOGLE_NEWS_QUERY_ITEM_CAP,
+        source_availability,
+    })
+}
+
+pub(crate) fn canonical_close_sample_timestamp(date: NaiveDate) -> DateTime<Utc> {
+    let local_close = date
+        .and_hms_opt(CANONICAL_CLOSE_HOUR_ET, CANONICAL_CLOSE_MINUTE_ET, 0)
+        .and_then(|timestamp| New_York.from_local_datetime(&timestamp).single())
+        .expect("market-close timestamps should be unambiguous in New York");
+
+    local_close.with_timezone(&Utc)
+}
+
+pub(crate) fn close_sample_price_frame(
+    symbol: &str,
+    history: &[DailyBar],
+    current_bar: &DailyBar,
+) -> PriceFrame {
+    let prev_close = history
+        .last()
+        .map(|bar| bar.close)
+        .filter(|value| *value > 0.0)
+        .unwrap_or(current_bar.open.max(current_bar.close));
+
+    PriceFrame {
+        symbol: symbol.to_string(),
+        snapshot: crate::sources::StockSnapshot {
+            latest_price: current_bar.close,
+            open: current_bar.open,
+            high: current_bar.high,
+            low: current_bar.low,
+            close: current_bar.close,
+            prev_close,
+            volume: current_bar.volume,
+        },
+        bars: history.to_vec(),
+    }
+}
+
+pub(crate) fn build_ml_data_from_source_data(source: &SampleSourceData<'_>) -> MLData {
+    let source_successes = source
+        .source_availability
+        .success_count(source.has_sector_benchmark);
+    let source_targets = 9 + u32::from(source.has_sector_benchmark);
+    let filing_features = derive_filing_features(&source.filings, source.now);
+    let has_recent_halt = source
+        .trade_halts
+        .iter()
+        .any(|halt| halt.ticker.eq_ignore_ascii_case(&source.ticker));
+    let news_features = derive_news_features_from_articles(
+        &source.ticker,
+        &source.articles,
+        filing_features.recent_earnings_filing_within_7d,
+        has_recent_halt,
+        source.now,
+        source.news_source_truncated,
+    );
+
+    build_ml_data_sample(
+        source.now,
+        &source.ticker_frame,
+        &source.benchmark_frame,
+        &source.qqq_frame,
+        &source.sector_frame,
+        source.sector_available,
+        &source.filings,
+        &news_features,
+        source.source_availability,
+        source_successes,
+        source_targets,
+        source.has_sector_benchmark,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_ml_data_sample(
+    now: DateTime<Utc>,
+    ticker_frame: &PriceFrame,
+    benchmark_frame: &PriceFrame,
+    qqq_frame: &PriceFrame,
+    sector_frame: &PriceFrame,
+    sector_available: bool,
+    filings: &[SecFiling],
+    news_features: &NewsFeatures,
+    source_availability: SourceAvailability,
+    source_successes: u32,
+    source_targets: u32,
+    has_sector_benchmark: bool,
+) -> MLData {
+    let price_features = derive_price_features(ticker_frame);
     let benchmark_price_features = derive_price_features(&benchmark_frame);
     let sector_price_features = derive_price_features(&sector_frame);
     let qqq_price_features = derive_price_features(&qqq_frame);
@@ -277,33 +410,20 @@ pub async fn collect_ml_data(ticker: &str) -> MLData {
         &sector_price_features,
         &qqq_price_features,
     );
-    let filing_features = derive_filing_features(&filings, now);
-    let has_recent_halt = trade_halts
-        .iter()
-        .any(|halt| halt.ticker.eq_ignore_ascii_case(&normalized_ticker));
-    let news_features = derive_news_features(
-        &normalized_ticker,
-        &news_1h,
-        &news_6h,
-        &news_24h,
-        &news_3d,
-        filing_features.recent_earnings_filing_within_7d,
-        has_recent_halt,
-        now,
-    );
+    let filing_features = derive_filing_features(filings, now);
     let (market_regime, regime_confidence) =
         classify_market_regime(&benchmark_price_features, &qqq_price_features);
     let quality = derive_quality_metrics(
         &source_availability,
         source_successes,
         source_targets,
-        &ticker_frame,
-        &benchmark_frame,
-        &qqq_frame,
-        sector_benchmark_symbol.is_some(),
-        &sector_frame,
+        ticker_frame,
+        benchmark_frame,
+        qqq_frame,
+        has_sector_benchmark,
+        sector_frame,
         &filing_features,
-        &news_features,
+        news_features,
         price_features.current_price,
     );
     let shared_context = build_shared_context(now, price_features.current_price, &quality);
@@ -499,8 +619,11 @@ fn derive_price_features(frame: &PriceFrame) -> PriceFeatures {
     let returns = simple_returns(&closes);
     let current_volume = frame.snapshot.volume;
     let historical_volumes: Vec<f64> = frame.bars.iter().map(|bar| bar.volume).collect();
-    let historical_dollar_volumes: Vec<f64> =
-        frame.bars.iter().map(|bar| bar.close * bar.volume).collect();
+    let historical_dollar_volumes: Vec<f64> = frame
+        .bars
+        .iter()
+        .map(|bar| bar.close * bar.volume)
+        .collect();
     let high_low_bars = combined_bars(frame);
 
     PriceFeatures {
@@ -597,8 +720,10 @@ fn derive_relative_features(
         } else {
             0.0
         },
-        excess_return_vs_benchmark_1d: price_features.return_1d - benchmark_price_features.return_1d,
-        excess_return_vs_benchmark_5d: price_features.return_5d - benchmark_price_features.return_5d,
+        excess_return_vs_benchmark_1d: price_features.return_1d
+            - benchmark_price_features.return_1d,
+        excess_return_vs_benchmark_5d: price_features.return_5d
+            - benchmark_price_features.return_5d,
         excess_return_vs_benchmark_20d: price_features.return_20d
             - benchmark_price_features.return_20d,
         excess_return_vs_sector_5d: if sector_available {
@@ -648,9 +773,7 @@ fn derive_filing_features(filings: &[SecFiling], now: DateTime<Utc>) -> FilingFe
             .iter()
             .copied()
             .min_by(|left, right| left.total_cmp(right)),
-        recent_earnings_filing_within_7d: earnings_filing_ages_days
-            .iter()
-            .any(|days| *days <= 7.0),
+        recent_earnings_filing_within_7d: earnings_filing_ages_days.iter().any(|days| *days <= 7.0),
         recent_earnings_filing_within_30d: earnings_filing_ages_days
             .iter()
             .any(|days| *days <= 30.0),
@@ -662,23 +785,36 @@ fn derive_filing_features(filings: &[SecFiling], now: DateTime<Utc>) -> FilingFe
     }
 }
 
-fn derive_news_features(
+pub(crate) fn derive_news_features_from_articles(
     ticker: &str,
-    news_1h: &[GoogleArticle],
-    news_6h: &[GoogleArticle],
-    news_24h: &[GoogleArticle],
-    news_3d: &[GoogleArticle],
+    articles: &[GoogleArticle],
     has_recent_earnings_filing: bool,
     has_recent_halt: bool,
     now: DateTime<Utc>,
+    source_truncated: bool,
 ) -> NewsFeatures {
-    // Compute all news windows from one merged, timestamped universe so the counts,
-    // ages, and sentiment windows agree with each other.
-    let merged_articles = merge_unique_articles(&[news_1h, news_6h, news_24h, news_3d]);
-    let window_1h = articles_within_hours(&merged_articles, now, 1.0);
-    let window_6h = articles_within_hours(&merged_articles, now, 6.0);
-    let window_24h = articles_within_hours(&merged_articles, now, 24.0);
-    let window_3d = articles_within_hours(&merged_articles, now, 72.0);
+    derive_news_features_from_merged_articles(
+        ticker,
+        &merge_unique_articles(&[articles]),
+        has_recent_earnings_filing,
+        has_recent_halt,
+        now,
+        source_truncated,
+    )
+}
+
+fn derive_news_features_from_merged_articles(
+    ticker: &str,
+    merged_articles: &[&GoogleArticle],
+    has_recent_earnings_filing: bool,
+    has_recent_halt: bool,
+    now: DateTime<Utc>,
+    source_truncated: bool,
+) -> NewsFeatures {
+    let window_1h = articles_within_hours(merged_articles, now, 1.0);
+    let window_6h = articles_within_hours(merged_articles, now, 6.0);
+    let window_24h = articles_within_hours(merged_articles, now, 24.0);
+    let window_3d = articles_within_hours(merged_articles, now, 72.0);
     let sentiments_24h: Vec<f64> = window_24h
         .iter()
         .map(|article| article_sentiment(article))
@@ -687,11 +823,11 @@ fn derive_news_features(
     let avg_news_sentiment_1h = average_article_sentiment_refs(&window_1h);
     let avg_news_sentiment_6h = average_article_sentiment_refs(&window_6h);
     let avg_news_sentiment_24h = average_article_sentiment_refs(&window_24h);
-    let source_truncated = news_24h.len() >= GOOGLE_NEWS_QUERY_ITEM_CAP
-        || news_3d.len() >= GOOGLE_NEWS_QUERY_ITEM_CAP;
     let has_high_impact_news_24h = has_recent_halt
         || has_recent_earnings_filing
-        || window_24h.iter().any(|article| is_high_impact_article(article))
+        || window_24h
+            .iter()
+            .any(|article| is_high_impact_article(article))
         || matches!(
             dominant_news_category,
             NewsCategory::Earnings | NewsCategory::LegalRegulatory | NewsCategory::MAndA
@@ -738,19 +874,31 @@ fn classify_market_regime(
     );
 
     if high_vol_score > 1.4 {
-        return (MarketRegime::HighVol, (high_vol_score / 2.0).clamp(0.0, 1.0) as f32);
+        return (
+            MarketRegime::HighVol,
+            (high_vol_score / 2.0).clamp(0.0, 1.0) as f32,
+        );
     }
 
     if risk_on_score > 1.0 {
-        return (MarketRegime::RiskOn, (risk_on_score / 2.0).clamp(0.0, 1.0) as f32);
+        return (
+            MarketRegime::RiskOn,
+            (risk_on_score / 2.0).clamp(0.0, 1.0) as f32,
+        );
     }
 
     if risk_off_score > 1.0 {
-        return (MarketRegime::RiskOff, (risk_off_score / 2.0).clamp(0.0, 1.0) as f32);
+        return (
+            MarketRegime::RiskOff,
+            (risk_off_score / 2.0).clamp(0.0, 1.0) as f32,
+        );
     }
 
     if trend_score.abs() > 1.25 {
-        return (MarketRegime::Trend, (trend_score.abs() / 2.0).clamp(0.0, 1.0) as f32);
+        return (
+            MarketRegime::Trend,
+            (trend_score.abs() / 2.0).clamp(0.0, 1.0) as f32,
+        );
     }
 
     if high_vol_score > 1.15 {
@@ -799,10 +947,8 @@ fn derive_quality_metrics(
         .hours_since_latest_news
         .map(|hours| hours > 72.0)
         .unwrap_or(false);
-    let stale_data_flag = source_coverage < 0.75
-        || history_coverage < 0.75
-        || news_stale
-        || current_price <= 0.0;
+    let stale_data_flag =
+        source_coverage < 0.75 || history_coverage < 0.75 || news_stale || current_price <= 0.0;
     let truncation_penalty = if news_features.source_truncated {
         NEWS_TRUNCATION_QUALITY_PENALTY
     } else {
@@ -815,8 +961,7 @@ fn derive_quality_metrics(
         news_features,
     );
     let missingness_penalty = missing_feature_fraction * 0.25;
-    let data_quality_score = (source_coverage * 0.65
-        + history_coverage * 0.35
+    let data_quality_score = (source_coverage * 0.65 + history_coverage * 0.35
         - if stale_data_flag { 0.1 } else { 0.0 }
         - truncation_penalty
         - missingness_penalty)
@@ -857,6 +1002,10 @@ fn build_shared_context(
         stale_data_flag: quality.stale_data_flag,
         data_quality_score: quality.data_quality_score,
     }
+}
+
+pub(crate) fn merged_news_articles(feeds: &[&[GoogleArticle]]) -> Vec<GoogleArticle> {
+    merge_unique_articles(feeds).into_iter().cloned().collect()
 }
 
 fn build_ticker_news_url(ticker: &str, window: &str) -> String {
@@ -1025,7 +1174,9 @@ fn range_position(series: &[f64], periods: usize) -> f64 {
     }
 
     let window = &series[series.len() - periods..];
-    let low = window.iter().fold(f64::INFINITY, |acc, value| acc.min(*value));
+    let low = window
+        .iter()
+        .fold(f64::INFINITY, |acc, value| acc.min(*value));
     let high = window
         .iter()
         .fold(f64::NEG_INFINITY, |acc, value| acc.max(*value));
@@ -1049,7 +1200,9 @@ fn recent_extreme(series: &[f64], periods: usize, find_high: bool) -> Option<f64
             .iter()
             .fold(f64::NEG_INFINITY, |acc, value| acc.max(*value))
     } else {
-        window.iter().fold(f64::INFINITY, |acc, value| acc.min(*value))
+        window
+            .iter()
+            .fold(f64::INFINITY, |acc, value| acc.min(*value))
     })
 }
 
@@ -1099,7 +1252,10 @@ fn atr_pct(bars: &[DailyBar], periods: usize) -> f64 {
         return 0.0;
     }
 
-    let atr = true_ranges[true_ranges.len() - periods..].iter().sum::<f64>() / periods as f64;
+    let atr = true_ranges[true_ranges.len() - periods..]
+        .iter()
+        .sum::<f64>()
+        / periods as f64;
     let current_price = bars.last().map(|bar| bar.close).unwrap_or(0.0);
 
     if current_price > 0.0 {
@@ -1219,7 +1375,11 @@ fn idiosyncratic_vol(lhs_series: &[f64], rhs_series: &[f64], periods: usize) -> 
     std_dev(&residuals)
 }
 
-fn aligned_return_windows(lhs_series: &[f64], rhs_series: &[f64], periods: usize) -> (Vec<f64>, Vec<f64>) {
+fn aligned_return_windows(
+    lhs_series: &[f64],
+    rhs_series: &[f64],
+    periods: usize,
+) -> (Vec<f64>, Vec<f64>) {
     let lhs = simple_returns(lhs_series);
     let rhs = simple_returns(rhs_series);
     let length = lhs.len().min(rhs.len()).min(periods);
@@ -1362,10 +1522,24 @@ fn categorize_news(article: &GoogleArticle) -> NewsCategory {
     let text = format!(
         "{} {}",
         article.title.to_ascii_lowercase(),
-        article.description.as_deref().unwrap_or("").to_ascii_lowercase()
+        article
+            .description
+            .as_deref()
+            .unwrap_or("")
+            .to_ascii_lowercase()
     );
 
-    if contains_any(&text, &["merger", "acquisition", "acquire", "buyout", "takeover", "deal"]) {
+    if contains_any(
+        &text,
+        &[
+            "merger",
+            "acquisition",
+            "acquire",
+            "buyout",
+            "takeover",
+            "deal",
+        ],
+    ) {
         return NewsCategory::MAndA;
     }
 
@@ -1421,7 +1595,15 @@ fn categorize_news(article: &GoogleArticle) -> NewsCategory {
 
     if contains_any(
         &text,
-        &["ceo", "cfo", "chair", "appoints", "appointment", "steps down", "resigns"],
+        &[
+            "ceo",
+            "cfo",
+            "chair",
+            "appoints",
+            "appointment",
+            "steps down",
+            "resigns",
+        ],
     ) {
         return NewsCategory::Management;
     }
@@ -1482,7 +1664,11 @@ fn relevance_weighted_sentiment(ticker: &str, articles: &[&GoogleArticle]) -> f6
 
     for article in articles {
         let title = article.title.to_ascii_lowercase();
-        let description = article.description.as_deref().unwrap_or("").to_ascii_lowercase();
+        let description = article
+            .description
+            .as_deref()
+            .unwrap_or("")
+            .to_ascii_lowercase();
         let mut weight = 1.0;
 
         if title.contains(&ticker) {
@@ -1588,7 +1774,13 @@ fn sentiment_ratio(sentiments: &[f64], positive: bool) -> f64 {
 
     let count = sentiments
         .iter()
-        .filter(|value| if positive { **value > 0.2 } else { **value < -0.2 })
+        .filter(|value| {
+            if positive {
+                **value > 0.2
+            } else {
+                **value < -0.2
+            }
+        })
         .count();
 
     count as f64 / sentiments.len() as f64
@@ -1745,9 +1937,5 @@ fn non_negative_age(now: DateTime<Utc>, value: DateTime<Utc>) -> Option<chrono::
 }
 
 fn as_f32(value: f64) -> f32 {
-    if value.is_finite() {
-        value as f32
-    } else {
-        0.0
-    }
+    if value.is_finite() { value as f32 } else { 0.0 }
 }

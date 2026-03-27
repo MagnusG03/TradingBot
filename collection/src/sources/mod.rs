@@ -8,7 +8,12 @@ pub use market_data::{
     DailyBar, PriceFrame, StockSnapshot, fetch_alpaca_stock_metrics, fetch_daily_bars,
     fetch_price_frame, fetch_return_1d_from_snapshot, fetch_stock_snapshot,
 };
-pub use news::{fetch_globenewswire, fetch_google_news, fetch_nasdaq_trade_halt, fetch_prnewswire};
+pub use news::{
+    fetch_globenewswire, fetch_google_news, fetch_google_news_range, fetch_nasdaq_trade_halt,
+    fetch_nasdaq_trade_halts_for_date, fetch_prnewswire,
+};
 pub use prediction_markets::{fetch_kalshi, fetch_polymarket};
 pub use reddit::{fetch_reddit, get_reddit_access_token};
-pub use sec::{fetch_sec_edgar_all, fetch_sec_edgar_ticker, lookup_sec_cik};
+pub use sec::{
+    fetch_sec_edgar_all, fetch_sec_edgar_ticker, fetch_sec_edgar_ticker_since, lookup_sec_cik,
+};

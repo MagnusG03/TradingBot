@@ -262,7 +262,7 @@ fn is_negation(token: &str) -> bool {
     return matches!(
         token,
         "no" | "not" | "never" | "none" | "without" | "hardly" | "neither"
-    )
+    );
 }
 
 fn intensity(token: &str) -> f64 {

@@ -243,6 +243,34 @@ AGGREGATOR_META_FIELDS = (
     "data_quality_score",
 )
 
+GENERALIST_TARGET_FIELDS = (
+    "expected_excess_return_7d",
+    "prob_outperform_7d",
+)
+
+TECHNICAL_TARGET_FIELDS = GENERALIST_TARGET_FIELDS
+EARNINGS_TARGET_FIELDS = GENERALIST_TARGET_FIELDS
+
+NEWS_TARGET_FIELDS = (
+    "expected_excess_return_7d",
+    "prob_outperform_7d",
+    "prob_large_move_7d",
+)
+
+REGIME_TARGET_FIELDS = (
+    "prob_signal_friendly",
+    "prob_risk_on",
+)
+
+AGGREGATION_TARGET_FIELDS = (
+    "expected_excess_return_7d",
+    "prob_outperform_7d",
+    "prob_tradeable_long_7d",
+    "prob_tradeable_short_7d",
+    "prob_large_move_7d",
+    "predicted_volatility_7d",
+)
+
 
 def load_collection_data(source: Any) -> dict[str, Any] | list[dict[str, Any]]:
     if isinstance(source, Mapping):
@@ -342,6 +370,27 @@ def build_aggregator_inputs(
     ]
 
 
+def prepare_training_targets(source: Any) -> dict[str, dict[str, np.ndarray]]:
+    data = load_collection_data(source)
+    records = data if isinstance(data, list) else [data]
+    target_rows = [_require_targets(record, index) for index, record in enumerate(records)]
+
+    return {
+        "generalist": _target_group(target_rows, GENERALIST_TARGET_FIELDS),
+        "technical": _target_group(target_rows, TECHNICAL_TARGET_FIELDS),
+        "earnings": _target_group(target_rows, EARNINGS_TARGET_FIELDS),
+        "news": _target_group(target_rows, NEWS_TARGET_FIELDS),
+        "regime": _target_group(target_rows, REGIME_TARGET_FIELDS),
+        "aggregation": _target_group(target_rows, AGGREGATION_TARGET_FIELDS),
+    }
+
+
+def prepare_training_dataset(
+    source: Any,
+) -> tuple[dict[str, np.ndarray], dict[str, dict[str, np.ndarray]]]:
+    return prepare_model_inputs(source), prepare_training_targets(source)
+
+
 def _feature_vector(
     section: Mapping[str, Any],
     feature_names: Iterable[str],
@@ -352,6 +401,25 @@ def _feature_vector(
     for name in feature_names:
         features.extend(_encode_feature(section, name))
     return _array(context + features)
+
+
+def _require_targets(record: Mapping[str, Any], index: int) -> Mapping[str, Any]:
+    item = _to_plain_data(record)
+    targets = item.get("targets")
+    if not isinstance(targets, Mapping):
+        raise KeyError(f"Record {index} is missing a 'targets' mapping.")
+    return targets
+
+
+def _target_group(
+    target_rows: Iterable[Mapping[str, Any]],
+    target_names: Iterable[str],
+) -> dict[str, np.ndarray]:
+    rows = list(target_rows)
+    return {
+        name: _array([[float(_float(row.get(name)))] for row in rows])
+        for name in target_names
+    }
 
 
 def _shared_context_14(ctx: Mapping[str, Any]) -> list[float]:
