@@ -2,9 +2,10 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import Model, layers, Input
 import numpy as np
+from handle_data import INPUT_WIDTHS
 
 #Generalist model
-inp = Input(shape=(60,))
+inp = Input(shape=(INPUT_WIDTHS["generalist"],))
 
 x = layers.Dense(128, activation='relu')(inp)
 x = layers.Dense(64, activation='relu')(x)
@@ -27,7 +28,7 @@ generalist.compile(
 )
 
 #Technical specialist model
-inp = Input(shape=(60,))
+inp = Input(shape=(INPUT_WIDTHS["technical"],))
 
 x = layers.Dense(128, activation='relu')(inp)
 x = layers.Dense(64, activation='relu')(x)
@@ -50,7 +51,7 @@ technical.compile(
 )
 
 #Earnings specialist model
-inp = Input(shape=(35,))
+inp = Input(shape=(INPUT_WIDTHS["earnings"],))
 
 x = layers.Dense(128, activation='relu')(inp)
 x = layers.Dense(64, activation='relu')(x)
@@ -73,7 +74,7 @@ earnings.compile(
 )
 
 #News specialist model
-inp = Input(shape=(37,))
+inp = Input(shape=(INPUT_WIDTHS["news"],))
 
 x = layers.Dense(128, activation='relu')(inp)
 x = layers.Dense(64, activation='relu')(x)
@@ -99,7 +100,7 @@ news.compile(
 )
 
 #Regime specialist model
-inp = Input(shape=(25,))
+inp = Input(shape=(INPUT_WIDTHS["regime"],))
 
 x = layers.Dense(128, activation='relu')(inp)
 x = layers.Dense(64, activation='relu')(x)
@@ -122,7 +123,7 @@ regime.compile(
 )
 
 #Aggregation model
-inp_meta = Input(shape=(17,))
+inp_meta = Input(shape=(INPUT_WIDTHS["aggregator_meta"],))
 inp_generalist = Input(shape=(2,))
 inp_technical = Input(shape=(2,))
 inp_earnings = Input(shape=(2,))
