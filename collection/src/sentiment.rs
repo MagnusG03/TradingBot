@@ -77,19 +77,22 @@ fn word_score(token: &str) -> Option<f64> {
         | "beat" | "beats" | "bullish" | "exceed" | "exceeds" | "exceeded" | "growth" | "grow"
         | "grows" | "grew" | "improve" | "improves" | "improved" | "outperform"
         | "outperformed" | "profit" | "profits" | "profitable" | "rebound" | "recovery"
-        | "strong" | "surge" | "surges" | "surged" | "upgrade" | "upgrades" | "upgraded"
-        | "win" | "wins" | "won" => 1.0,
+        | "resilient" | "strong" | "surge" | "surges" | "surged" | "tailwind" | "upgrade"
+        | "upgrades" | "upgraded" | "upside" | "undervalued" | "win" | "wins" | "won" => 1.0,
         "boost" | "boosts" | "gain" | "gains" | "gained" | "jump" | "jumps" | "jumped" | "lift"
         | "lifts" | "lifted" | "raise" | "raises" | "raised" => 0.8,
+        "attractive" | "bought" | "buys" | "buying" | "confidence" | "demand" | "effective"
+        | "effectiveness" | "leadership" | "momentum" | "strength" => 0.6,
         "bankruptcy" | "bankrupt" | "bearish" | "breach" | "concern" | "concerns" | "decline"
         | "declines" | "declined" | "delay" | "delays" | "delayed" | "downgrade" | "downgrades"
         | "downgraded" | "drop" | "drops" | "dropped" | "fall" | "falls" | "fell" | "fraud"
-        | "investigation" | "investigations" | "lawsuit" | "lawsuits" | "loss" | "losses"
-        | "miss" | "misses" | "missed" | "plunge" | "plunges" | "plunged" | "probe" | "probes"
-        | "recall" | "recalls" | "risk" | "risks" | "scandal" | "slump" | "slumps" | "slumped"
-        | "weak" | "warning" | "warnings" => -1.0,
+        | "headwind" | "headwinds" | "investigation" | "investigations" | "lawsuit"
+        | "lawsuits" | "loss" | "losses" | "miss" | "misses" | "missed" | "plunge" | "plunges"
+        | "plunged" | "probe" | "probes" | "recall" | "recalls" | "risk" | "risks" | "scandal"
+        | "selloff" | "selloffs" | "slump" | "slumps" | "slumped" | "uncertainty" | "weak"
+        | "weakness" | "warning" | "warnings" => -1.0,
         "antitrust" | "dilution" | "halt" | "halted" | "layoff" | "layoffs" | "offering"
-        | "pressure" => -0.8,
+        | "pressure" | "tested" | "testing" | "volatile" | "volatility" => -0.8,
         _ => return None,
     })
 }
@@ -98,6 +101,20 @@ fn phrase_score(tokens: &[&str], index: usize) -> Option<(usize, f64)> {
     let first = tokens.get(index).copied()?;
     let second = tokens.get(index + 1).copied();
     let third = tokens.get(index + 2).copied();
+    let fourth = tokens.get(index + 3).copied();
+
+    match (first, second, third, fourth) {
+        ("support", Some("level"), Some("being"), Some("tested")) => return Some((4, -1.6)),
+        ("buys", Some(_), Some(_), Some("shares"))
+        | ("buys", Some(_), Some("shares"), _)
+        | ("bought", Some(_), Some(_), Some("shares"))
+        | ("bought", Some(_), Some("shares"), _) => return Some((4, 1.2)),
+        ("sells", Some(_), Some(_), Some("shares"))
+        | ("sells", Some(_), Some("shares"), _)
+        | ("sold", Some(_), Some(_), Some("shares"))
+        | ("sold", Some(_), Some("shares"), _) => return Some((4, -1.2)),
+        _ => {}
+    }
 
     match (first, second, third) {
         ("price", Some("target"), Some(third))
@@ -110,6 +127,28 @@ fn phrase_score(tokens: &[&str], index: usize) -> Option<(usize, f64)> {
         {
             return Some((3, -1.6));
         }
+        (first, Some(_), Some("target"))
+            if matches_any(
+                first,
+                &[
+                    "raise", "raises", "raised", "boost", "boosts", "hike", "hikes",
+                ],
+            ) =>
+        {
+            return Some((3, 1.5));
+        }
+        (first, Some(_), Some("target"))
+            if matches_any(
+                first,
+                &[
+                    "cut", "cuts", "lower", "lowers", "lowered", "reduce", "reduces",
+                ],
+            ) =>
+        {
+            return Some((3, -1.5));
+        }
+        ("high", Some(_), Some("demand")) => return Some((3, 1.3)),
+        ("largest", Some("weekly"), Some("decline")) => return Some((3, -1.7)),
         ("class", Some("action"), Some("lawsuit")) => return Some((3, -1.9)),
         ("fda", Some("grants"), Some("approval")) => return Some((3, 1.9)),
         ("sec", Some("opens"), Some("probe"))
@@ -254,6 +293,24 @@ fn phrase_score(tokens: &[&str], index: usize) -> Option<(usize, f64)> {
         {
             Some((2, -1.8))
         }
+        (first, Some(second))
+            if matches_any(first, &["double", "doubling"]) && second == "down" =>
+        {
+            Some((2, 1.2))
+        }
+        (first, Some(second)) if first == "gains" && second == "confidence" => Some((2, 1.3)),
+        (first, Some(second)) if first == "pricing" && second == "power" => Some((2, 1.2)),
+        (first, Some(second)) if first == "largest" && second == "position" => Some((2, 1.1)),
+        (first, Some(second)) if first == "holdings" && second == "lowered" => Some((2, -1.0)),
+        (first, Some(second)) if first == "holdings" && second == "raised" => Some((2, 1.0)),
+        (first, Some(second)) if first == "buy" && second == "rating" => Some((2, 1.2)),
+        (first, Some(second)) if first == "sell" && second == "rating" => Some((2, -1.2)),
+        (first, Some(second)) if first == "top" && second == "pick" => Some((2, 1.3)),
+        (first, Some(second)) if first == "trading" && second == "down" => Some((2, -1.5)),
+        (first, Some(second)) if first == "sell" && second == "off" => Some((2, -1.7)),
+        (first, Some(second)) if first == "best" && second == "performance" => Some((2, 1.4)),
+        (first, Some(second)) if first == "high" && second == "demand" => Some((2, 1.3)),
+        (first, Some(second)) if first == "screaming" && second == "buy" => Some((2, 1.9)),
         _ => None,
     }
 }
