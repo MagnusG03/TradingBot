@@ -41,11 +41,30 @@ async fn write_train(args: &[String]) -> Result<(), Box<dyn Error>> {
     let (tickers, target_records) = parse_train_args(args)?;
     let output = default_training_output(&tickers);
     let mut records = Vec::new();
+    let total_tickers = tickers.len();
 
-    for ticker in tickers {
+    println!(
+        "Collecting training data for {total_tickers} ticker(s) with target {target_records} records..."
+    );
+
+    for (ticker_index, ticker) in tickers.into_iter().enumerate() {
+        println!(
+            "[train] Ticker {}/{}: {}",
+            ticker_index + 1,
+            total_tickers,
+            ticker
+        );
         let mut new_records = collect_ml_training_data_for_ticker(&ticker).await;
+        let new_record_count = new_records.len();
         records.append(&mut new_records);
+        println!(
+            "[train] {} contributed {} records ({} total so far).",
+            ticker,
+            new_record_count,
+            records.len()
+        );
         if records.len() >= target_records {
+            println!("[train] Target record count reached; stopping early.");
             break;
         }
     }

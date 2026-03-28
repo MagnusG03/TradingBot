@@ -31,6 +31,7 @@ const NEWS_CHUNK_DAYS: i64 = 7;
 const HALT_FETCH_BATCH_SIZE: usize = 16;
 const NEWS_FETCH_BATCH_SIZE: usize = 8;
 const EXTRA_PRICE_HISTORY_BUFFER_DAYS: i64 = 180;
+const SAMPLE_BUILD_PROGRESS_INTERVAL: usize = 250;
 
 #[derive(Clone)]
 struct AlignedBars {
@@ -95,6 +96,7 @@ pub async fn collect_ml_training_data_for_ticker(ticker: &str) -> Vec<MLTraining
         return Vec::new();
     }
 
+    println!("[train:{normalized_ticker}] Starting training data collection...");
     let training_sample_lookback_days = training_sample_lookback_days();
     let price_history_lookback_days =
         training_sample_lookback_days + EXTRA_PRICE_HISTORY_BUFFER_DAYS;
@@ -107,6 +109,7 @@ pub async fn collect_ml_training_data_for_ticker(ticker: &str) -> Vec<MLTraining
         .checked_sub_signed(Duration::days(FILING_LOOKBACK_BUFFER_DAYS))
         .unwrap_or(training_start_date);
     let sector_benchmark_symbol = lookup_sector_benchmark_symbol(&normalized_ticker, None);
+    println!("[train:{normalized_ticker}] Fetching price history, benchmark data, and filings...");
     let (
         ticker_bars_result,
         benchmark_bars_result,
@@ -151,6 +154,9 @@ pub async fn collect_ml_training_data_for_ticker(ticker: &str) -> Vec<MLTraining
     );
 
     if aligned.len() <= REQUIRED_HISTORY_BARS + FORECAST_HORIZON_BARS {
+        println!(
+            "[train:{normalized_ticker}] Not enough aligned history to build training samples."
+        );
         return Vec::new();
     }
 
@@ -159,6 +165,7 @@ pub async fn collect_ml_training_data_for_ticker(ticker: &str) -> Vec<MLTraining
         .collect();
 
     if sample_indices.is_empty() {
+        println!("[train:{normalized_ticker}] No sample dates available in the lookback window.");
         return Vec::new();
     }
 
@@ -166,7 +173,13 @@ pub async fn collect_ml_training_data_for_ticker(ticker: &str) -> Vec<MLTraining
         .iter()
         .map(|index| aligned[*index].date)
         .collect();
-    let trade_halt_cache = fetch_trade_halts_for_dates(&sample_dates, &client).await;
+    println!(
+        "[train:{normalized_ticker}] Prepared {} sample dates from {} aligned bars.",
+        sample_indices.len(),
+        aligned.len()
+    );
+    let trade_halt_cache =
+        fetch_trade_halts_for_dates(&normalized_ticker, &sample_dates, &client).await;
     let earliest_news_date = sample_dates
         .first()
         .and_then(|date| date.checked_sub_signed(Duration::days(NEWS_LOOKBACK_DAYS)))
@@ -185,7 +198,8 @@ pub async fn collect_ml_training_data_for_ticker(ticker: &str) -> Vec<MLTraining
 
     let mut records = Vec::new();
 
-    for current_index in sample_indices {
+    let total_samples = sample_indices.len();
+    for (processed_index, current_index) in sample_indices.into_iter().enumerate() {
         let current = &aligned[current_index];
         let history = &aligned[..current_index];
         let ticker_history: Vec<_> = history.iter().map(|bars| bars.ticker.clone()).collect();
@@ -250,8 +264,19 @@ pub async fn collect_ml_training_data_for_ticker(ticker: &str) -> Vec<MLTraining
             data,
             targets,
         ));
+
+        let processed = processed_index + 1;
+        if processed == total_samples || processed % SAMPLE_BUILD_PROGRESS_INTERVAL == 0 {
+            println!(
+                "[train:{normalized_ticker}] Built {processed}/{total_samples} training samples..."
+            );
+        }
     }
 
+    println!(
+        "[train:{normalized_ticker}] Finished with {} training records.",
+        records.len()
+    );
     records
 }
 
@@ -269,6 +294,7 @@ async fn fetch_optional_daily_bars(
 }
 
 async fn fetch_trade_halts_for_dates(
+    ticker: &str,
     dates: &[NaiveDate],
     client: &Client,
 ) -> HashMap<NaiveDate, TradeHaltDay> {
@@ -277,6 +303,14 @@ async fn fetch_trade_halts_for_dates(
     unique_dates.dedup();
 
     let mut by_date = HashMap::new();
+    let total_batches = unique_dates.len().div_ceil(HALT_FETCH_BATCH_SIZE);
+    let mut completed_batches = 0;
+
+    println!(
+        "[train:{ticker}] Fetching trade halts for {} unique dates in {} batches...",
+        unique_dates.len(),
+        total_batches
+    );
 
     for chunk in unique_dates.chunks(HALT_FETCH_BATCH_SIZE) {
         let mut set = JoinSet::new();
@@ -303,6 +337,9 @@ async fn fetch_trade_halts_for_dates(
                 by_date.insert(date, halts);
             }
         }
+
+        completed_batches += 1;
+        println!("[train:{ticker}] Trade halt batches: {completed_batches}/{total_batches}");
     }
 
     by_date
@@ -327,6 +364,14 @@ async fn fetch_historical_news_chunks(
     }
 
     let mut chunks = Vec::new();
+    let total_batches = ranges.len().div_ceil(NEWS_FETCH_BATCH_SIZE);
+    let mut completed_batches = 0;
+
+    println!(
+        "[train:{ticker}] Fetching historical news in {} chunks across {} batches...",
+        ranges.len(),
+        total_batches
+    );
 
     for range_batch in ranges.chunks(NEWS_FETCH_BATCH_SIZE) {
         let mut set = JoinSet::new();
@@ -364,6 +409,9 @@ async fn fetch_historical_news_chunks(
                 chunks.push(chunk);
             }
         }
+
+        completed_batches += 1;
+        println!("[train:{ticker}] News batches: {completed_batches}/{total_batches}");
     }
 
     chunks.sort_by_key(|chunk| chunk.start);
