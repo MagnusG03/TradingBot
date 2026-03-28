@@ -7,8 +7,8 @@ use tokio::task::JoinSet;
 use crate::{
     AppResult, build_client, lookup_sector_benchmark_symbol,
     sources::{
-        DailyBar, PriceFrame, fetch_google_news_range, fetch_nasdaq_trade_halts_for_date,
-        fetch_price_frame, fetch_sec_edgar_ticker_since,
+        DailyBar, PriceFrame, fetch_daily_bars_with_lookback, fetch_google_news_range,
+        fetch_nasdaq_trade_halts_for_date, fetch_sec_edgar_ticker_since,
     },
     types::{GoogleArticle, MLTrainingRecord, MLTrainingTargets, NasdaqTradeHalt},
     utils::{normalize_ticker, parse_datetime_to_utc},
@@ -24,12 +24,13 @@ const FORECAST_HORIZON_BARS: usize = 7;
 const LARGE_MOVE_THRESHOLD_7D: f64 = 0.05;
 const TRADEABLE_EDGE_THRESHOLD_7D: f64 = 0.02;
 const MIN_SIGNAL_FRIENDLY_TREND_7D: f64 = 0.01;
-const TRAINING_SAMPLE_LOOKBACK_DAYS: i64 = 365;
+const DEFAULT_TRAINING_SAMPLE_LOOKBACK_DAYS: i64 = 3650;
 const FILING_LOOKBACK_BUFFER_DAYS: i64 = 120;
 const NEWS_LOOKBACK_DAYS: i64 = 3;
 const NEWS_CHUNK_DAYS: i64 = 7;
 const HALT_FETCH_BATCH_SIZE: usize = 16;
 const NEWS_FETCH_BATCH_SIZE: usize = 8;
+const EXTRA_PRICE_HISTORY_BUFFER_DAYS: i64 = 180;
 
 #[derive(Clone)]
 struct AlignedBars {
@@ -94,52 +95,59 @@ pub async fn collect_ml_training_data_for_ticker(ticker: &str) -> Vec<MLTraining
         return Vec::new();
     }
 
+    let training_sample_lookback_days = training_sample_lookback_days();
+    let price_history_lookback_days =
+        training_sample_lookback_days + EXTRA_PRICE_HISTORY_BUFFER_DAYS;
     let now = Utc::now();
     let training_start_date = now
         .date_naive()
-        .checked_sub_signed(Duration::days(TRAINING_SAMPLE_LOOKBACK_DAYS))
+        .checked_sub_signed(Duration::days(training_sample_lookback_days))
         .unwrap_or(NaiveDate::MIN);
     let filing_min_date = training_start_date
         .checked_sub_signed(Duration::days(FILING_LOOKBACK_BUFFER_DAYS))
         .unwrap_or(training_start_date);
     let sector_benchmark_symbol = lookup_sector_benchmark_symbol(&normalized_ticker, None);
     let (
-        ticker_frame_result,
-        benchmark_frame_result,
-        qqq_frame_result,
-        sector_frame_result,
+        ticker_bars_result,
+        benchmark_bars_result,
+        qqq_bars_result,
+        sector_bars_result,
         filings_result,
     ) = tokio::join!(
-        fetch_price_frame(&normalized_ticker, &client),
-        fetch_price_frame(BENCHMARK_SYMBOL, &client),
-        fetch_price_frame(QQQ_SYMBOL, &client),
-        fetch_optional_price_frame(sector_benchmark_symbol, &client),
+        fetch_daily_bars_with_lookback(&normalized_ticker, &client, price_history_lookback_days),
+        fetch_daily_bars_with_lookback(BENCHMARK_SYMBOL, &client, price_history_lookback_days),
+        fetch_daily_bars_with_lookback(QQQ_SYMBOL, &client, price_history_lookback_days),
+        fetch_optional_daily_bars(
+            sector_benchmark_symbol,
+            &client,
+            price_history_lookback_days,
+        ),
         fetch_sec_edgar_ticker_since(&normalized_ticker, &client, Some(filing_min_date)),
     );
 
-    let Ok(ticker_frame) = ticker_frame_result else {
+    let Ok(ticker_bars) = ticker_bars_result else {
         return Vec::new();
     };
-    let Ok(benchmark_frame) = benchmark_frame_result else {
+    let Ok(benchmark_bars) = benchmark_bars_result else {
         return Vec::new();
     };
-    let Ok(qqq_frame) = qqq_frame_result else {
+    let Ok(qqq_bars) = qqq_bars_result else {
         return Vec::new();
     };
 
     let has_sector_benchmark = sector_benchmark_symbol.is_some();
-    let sector_available = matches!(sector_frame_result, Ok(Some(_)));
-    let sector_frame = match sector_frame_result {
-        Ok(Some(frame)) => frame,
-        _ => PriceFrame::default(),
+    let sector_available = matches!(sector_bars_result, Ok(Some(_)));
+    let sector_bars = match sector_bars_result {
+        Ok(Some(bars)) => bars,
+        _ => Vec::new(),
     };
     let filings_available = filings_result.is_ok();
     let filings = filings_result.unwrap_or_default();
     let aligned = align_historical_bars(
-        &ticker_frame,
-        &benchmark_frame,
-        &qqq_frame,
-        sector_available.then_some(&sector_frame),
+        &ticker_bars,
+        &benchmark_bars,
+        &qqq_bars,
+        sector_available.then_some(sector_bars.as_slice()),
     );
 
     if aligned.len() <= REQUIRED_HISTORY_BARS + FORECAST_HORIZON_BARS {
@@ -247,12 +255,15 @@ pub async fn collect_ml_training_data_for_ticker(ticker: &str) -> Vec<MLTraining
     records
 }
 
-async fn fetch_optional_price_frame(
+async fn fetch_optional_daily_bars(
     symbol: Option<&'static str>,
     client: &Client,
-) -> AppResult<Option<PriceFrame>> {
+    lookback_days: i64,
+) -> AppResult<Option<Vec<DailyBar>>> {
     match symbol {
-        Some(symbol) => fetch_price_frame(symbol, client).await.map(Some),
+        Some(symbol) => fetch_daily_bars_with_lookback(symbol, client, lookback_days)
+            .await
+            .map(Some),
         None => Ok(None),
     }
 }
@@ -393,17 +404,17 @@ fn sample_news_window(
 }
 
 fn align_historical_bars(
-    ticker_frame: &PriceFrame,
-    benchmark_frame: &PriceFrame,
-    qqq_frame: &PriceFrame,
-    sector_frame: Option<&PriceFrame>,
+    ticker_bars: &[DailyBar],
+    benchmark_bars: &[DailyBar],
+    qqq_bars: &[DailyBar],
+    sector_bars: Option<&[DailyBar]>,
 ) -> Vec<AlignedBars> {
-    let benchmark_by_date = bars_by_date(&benchmark_frame.bars);
-    let qqq_by_date = bars_by_date(&qqq_frame.bars);
-    let sector_by_date = sector_frame.map(|frame| bars_by_date(&frame.bars));
+    let benchmark_by_date = bars_by_date(benchmark_bars);
+    let qqq_by_date = bars_by_date(qqq_bars);
+    let sector_by_date = sector_bars.map(bars_by_date);
     let mut aligned = Vec::new();
 
-    for ticker_bar in &ticker_frame.bars {
+    for ticker_bar in ticker_bars {
         let Some(parsed_timestamp) = parse_datetime_to_utc(&ticker_bar.timestamp) else {
             continue;
         };
@@ -531,4 +542,12 @@ fn safe_ratio(current: f64, base: f64) -> f64 {
     } else {
         0.0
     }
+}
+
+fn training_sample_lookback_days() -> i64 {
+    std::env::var("TB_TRAINING_LOOKBACK_DAYS")
+        .ok()
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .map(|days| days.max(365))
+        .unwrap_or(DEFAULT_TRAINING_SAMPLE_LOOKBACK_DAYS)
 }

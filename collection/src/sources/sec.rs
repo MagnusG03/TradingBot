@@ -5,7 +5,12 @@ use chrono::NaiveDate;
 use reqwest::Client;
 use serde::Deserialize;
 
-use crate::{AppResult, types::SecFiling, utils::normalize_ticker};
+use crate::{
+    AppResult,
+    throttle::{RequestSource, send_with_throttle},
+    types::SecFiling,
+    utils::normalize_ticker,
+};
 
 #[derive(Debug, Deserialize)]
 struct SecSubmissions {
@@ -85,13 +90,14 @@ pub async fn fetch_sec_edgar_ticker_since(
     min_date: Option<NaiveDate>,
 ) -> AppResult<Vec<SecFiling>> {
     let cik = lookup_sec_cik(ticker, client).await?;
-    let submissions: SecSubmissions = client
-        .get(format!("https://data.sec.gov/submissions/CIK{cik}.json"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let submissions: SecSubmissions = send_with_throttle(
+        client.get(format!("https://data.sec.gov/submissions/CIK{cik}.json")),
+        RequestSource::SecEdgar,
+    )
+    .await?
+    .error_for_status()?
+    .json()
+    .await?;
 
     let SecSubmissions {
         name: company_name,
@@ -111,13 +117,14 @@ pub async fn fetch_sec_edgar_ticker_since(
             continue;
         }
 
-        let historical: SecRecentFilings = client
-            .get(format!("https://data.sec.gov/submissions/{}", file.name))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let historical: SecRecentFilings = send_with_throttle(
+            client.get(format!("https://data.sec.gov/submissions/{}", file.name)),
+            RequestSource::SecEdgar,
+        )
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
 
         filings.extend(build_submission_filings(
             &historical,
@@ -285,19 +292,18 @@ fn is_relevant_form(form: &str) -> bool {
 async fn load_company_ticker_entries(
     client: &Client,
 ) -> AppResult<HashMap<String, CompanyTickerEntry>> {
-    Ok(client
-        .get("https://www.sec.gov/files/company_tickers.json")
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?)
+    Ok(send_with_throttle(
+        client.get("https://www.sec.gov/files/company_tickers.json"),
+        RequestSource::SecEdgar,
+    )
+    .await?
+    .error_for_status()?
+    .json()
+    .await?)
 }
 
 async fn fetch_atom_feed(client: &Client, url: &str) -> AppResult<Feed> {
-    let bytes = client
-        .get(url)
-        .send()
+    let bytes = send_with_throttle(client.get(url), RequestSource::SecEdgar)
         .await?
         .error_for_status()?
         .bytes()

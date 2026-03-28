@@ -2,7 +2,12 @@ use chrono::{Duration, Utc};
 use reqwest::{Client, RequestBuilder};
 use serde::Deserialize;
 
-use crate::{AppResult, types::AlpacaStockMetrics, utils::normalize_ticker};
+use crate::{
+    AppResult,
+    throttle::{RequestSource, send_with_throttle},
+    types::AlpacaStockMetrics,
+    utils::normalize_ticker,
+};
 
 const HISTORY_LOOKBACK_DAYS: i64 = 450;
 const HISTORY_LIMIT: &str = "360";
@@ -43,6 +48,8 @@ struct AlpacaTrade {
 #[derive(Debug, Deserialize)]
 struct BarsResponse {
     bars: Vec<AlpacaBar>,
+    #[serde(default)]
+    next_page_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,15 +99,17 @@ pub async fn fetch_stock_snapshot(symbol: &str, client: &Client) -> AppResult<St
     let symbol = normalize_ticker(symbol);
     let (api_key, api_secret) = alpaca_credentials()?;
 
-    let snapshot: Snapshot = with_alpaca_auth(
-        client.get(format!(
-            "https://data.alpaca.markets/v2/stocks/{symbol}/snapshot"
-        )),
-        &api_key,
-        &api_secret,
+    let snapshot: Snapshot = send_with_throttle(
+        with_alpaca_auth(
+            client.get(format!(
+                "https://data.alpaca.markets/v2/stocks/{symbol}/snapshot"
+            )),
+            &api_key,
+            &api_secret,
+        )
+        .query(&[("feed", "iex")]),
+        RequestSource::AlpacaMarketData,
     )
-    .query(&[("feed", "iex")])
-    .send()
     .await?
     .error_for_status()?
     .json()
@@ -151,45 +160,66 @@ pub async fn fetch_stock_snapshot(symbol: &str, client: &Client) -> AppResult<St
 }
 
 pub async fn fetch_daily_bars(symbol: &str, client: &Client) -> AppResult<Vec<DailyBar>> {
+    fetch_daily_bars_with_lookback(symbol, client, HISTORY_LOOKBACK_DAYS).await
+}
+
+pub async fn fetch_daily_bars_with_lookback(
+    symbol: &str,
+    client: &Client,
+    lookback_days: i64,
+) -> AppResult<Vec<DailyBar>> {
     let symbol = normalize_ticker(symbol);
     let (api_key, api_secret) = alpaca_credentials()?;
     let now = Utc::now();
-    let start = (now - Duration::days(HISTORY_LOOKBACK_DAYS)).to_rfc3339();
+    let start = (now - Duration::days(lookback_days.max(30))).to_rfc3339();
     let end = (now - Duration::days(1)).to_rfc3339();
+    let mut all_bars = Vec::new();
+    let mut next_page_token = None;
 
-    let response: BarsResponse = with_alpaca_auth(
-        client.get(format!(
-            "https://data.alpaca.markets/v2/stocks/{symbol}/bars"
-        )),
-        &api_key,
-        &api_secret,
-    )
-    .query(&[
-        ("timeframe", "1Day"),
-        ("start", start.as_str()),
-        ("end", end.as_str()),
-        ("adjustment", "raw"),
-        ("feed", "iex"),
-        ("limit", HISTORY_LIMIT),
-    ])
-    .send()
-    .await?
-    .error_for_status()?
-    .json()
-    .await?;
+    loop {
+        let mut request = with_alpaca_auth(
+            client.get(format!(
+                "https://data.alpaca.markets/v2/stocks/{symbol}/bars"
+            )),
+            &api_key,
+            &api_secret,
+        )
+        .query(&[
+            ("timeframe", "1Day"),
+            ("start", start.as_str()),
+            ("end", end.as_str()),
+            ("adjustment", "raw"),
+            ("feed", "iex"),
+            ("limit", HISTORY_LIMIT),
+        ]);
+        if let Some(page_token) = next_page_token.as_deref() {
+            request = request.query(&[("page_token", page_token)]);
+        }
 
-    Ok(response
-        .bars
-        .into_iter()
-        .map(|bar| DailyBar {
+        let response: BarsResponse = send_with_throttle(request, RequestSource::AlpacaMarketData)
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        all_bars.extend(response.bars.into_iter().map(|bar| DailyBar {
             timestamp: bar.t,
             open: bar.o,
             high: bar.h,
             low: bar.l,
             close: bar.c,
             volume: bar.v,
-        })
-        .collect())
+        }));
+
+        match response.next_page_token {
+            Some(token) if !token.trim().is_empty() => {
+                next_page_token = Some(token);
+            }
+            _ => break,
+        }
+    }
+
+    Ok(all_bars)
 }
 
 pub async fn fetch_return_1d_from_snapshot(symbol: &str, client: &Client) -> AppResult<f64> {

@@ -6,7 +6,8 @@ mod sec;
 
 pub use market_data::{
     DailyBar, PriceFrame, StockSnapshot, fetch_alpaca_stock_metrics, fetch_daily_bars,
-    fetch_price_frame, fetch_return_1d_from_snapshot, fetch_stock_snapshot,
+    fetch_daily_bars_with_lookback, fetch_price_frame, fetch_return_1d_from_snapshot,
+    fetch_stock_snapshot,
 };
 pub use news::{
     fetch_globenewswire, fetch_google_news, fetch_google_news_range, fetch_nasdaq_trade_halt,

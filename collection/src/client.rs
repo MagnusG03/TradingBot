@@ -8,10 +8,12 @@ use reqwest::{
 
 const DEFAULT_SEC_COMPANY: &str = "TradingBot";
 const DEFAULT_SEC_EMAIL: &str = "admin@example.com";
+const SEC_COMPANY_ENV: &str = "SEC_COMPANY_NAME";
+const SEC_EMAIL_ENV: &str = "SEC_CONTACT_EMAIL";
 
 pub fn build_client() -> Client {
-    let company = env_or_default("MagnusTradingBot", DEFAULT_SEC_COMPANY);
-    let email = env_or_default("mgrini2003@gmail.com", DEFAULT_SEC_EMAIL);
+    let company = env_or_default(SEC_COMPANY_ENV, DEFAULT_SEC_COMPANY);
+    let email = env_or_default(SEC_EMAIL_ENV, DEFAULT_SEC_EMAIL);
     let user_agent = format!("{company} {email}");
 
     let mut headers = HeaderMap::new();

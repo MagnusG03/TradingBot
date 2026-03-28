@@ -6,6 +6,7 @@ use scraper::Html;
 
 use crate::{
     AppResult,
+    throttle::{RequestSource, send_with_throttle},
     types::{GlobeNewswireRelease, GoogleArticle, NasdaqTradeHalt, PrNewswireRelease},
 };
 
@@ -16,7 +17,7 @@ pub async fn fetch_prnewswire(
     client: &Client,
     feed_url: &str,
 ) -> AppResult<Vec<PrNewswireRelease>> {
-    let channel = read_channel(client, feed_url, None).await?;
+    let channel = read_channel(client, feed_url, None, RequestSource::PublicRss).await?;
     let source_section = channel.title().to_string();
 
     Ok(channel
@@ -39,7 +40,7 @@ pub async fn fetch_globenewswire(
     client: &Client,
     feed_url: &str,
 ) -> AppResult<Vec<GlobeNewswireRelease>> {
-    let channel = read_channel(client, feed_url, None).await?;
+    let channel = read_channel(client, feed_url, None, RequestSource::PublicRss).await?;
     let feed_name = channel.title().trim().to_string();
 
     Ok(channel
@@ -68,7 +69,7 @@ pub async fn fetch_nasdaq_trade_halt(
     client: &Client,
     feed_url: &str,
 ) -> AppResult<Vec<NasdaqTradeHalt>> {
-    let channel = read_channel(client, feed_url, None).await?;
+    let channel = read_channel(client, feed_url, None, RequestSource::NasdaqTradeHaltsRss).await?;
     let today = Utc::now()
         .with_timezone(&New_York)
         .format("%m/%d/%Y")
@@ -107,7 +108,7 @@ pub async fn fetch_nasdaq_trade_halts_for_date(
         "https://www.nasdaqtrader.com/rss.aspx?feed=tradehalts&haltdate={}",
         date.format("%m%d%Y")
     );
-    let channel = read_channel(client, &feed_url, None).await?;
+    let channel = read_channel(client, &feed_url, None, RequestSource::NasdaqTradeHaltsRss).await?;
 
     Ok(channel
         .items()
@@ -130,7 +131,13 @@ pub async fn fetch_nasdaq_trade_halts_for_date(
 }
 
 pub async fn fetch_google_news(url: &str, client: &Client) -> AppResult<Vec<GoogleArticle>> {
-    let channel = read_channel(client, &url, Some(GOOGLE_NEWS_REFERER)).await?;
+    let channel = read_channel(
+        client,
+        &url,
+        Some(GOOGLE_NEWS_REFERER),
+        RequestSource::GoogleNewsRss,
+    )
+    .await?;
     let articles: Vec<GoogleArticle> = channel
         .items()
         .iter()
@@ -168,9 +175,18 @@ pub async fn fetch_google_news_range(
     fetch_google_news(&url, client).await
 }
 
-async fn read_channel(client: &Client, url: &str, referer: Option<&str>) -> AppResult<Channel> {
+async fn read_channel(
+    client: &Client,
+    url: &str,
+    referer: Option<&str>,
+    source: RequestSource,
+) -> AppResult<Channel> {
     let request = add_referer(client.get(url), referer);
-    let bytes = request.send().await?.error_for_status()?.bytes().await?;
+    let bytes = send_with_throttle(request, source)
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
 
     Ok(Channel::read_from(&bytes[..])?)
 }

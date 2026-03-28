@@ -3,10 +3,11 @@ pub mod collectors;
 mod sector_lookup;
 mod sentiment;
 pub mod sources;
+mod throttle;
 mod types;
 mod utils;
 
-pub type AppResult<T> = Result<T, Box<dyn std::error::Error>>;
+pub type AppResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 pub use client::build_client;
 pub use collectors::{
