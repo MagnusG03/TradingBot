@@ -6,9 +6,16 @@ from pathlib import Path
 from tensorflow.keras.callbacks import EarlyStopping
 
 from handle_data import (
+    apply_aggregator_input_normalization,
+    apply_model_input_normalization,
     build_aggregator_inputs,
+    fit_aggregator_input_normalization,
+    fit_model_input_normalization,
+    NORMALIZATION_FILENAME,
     prepare_model_inputs,
     prepare_training_targets,
+    save_normalization_bundle,
+    training_row_count,
 )
 from model import aggregation, earnings, generalist, news, regime, technical
 
@@ -65,7 +72,10 @@ def fit_model(
     )
 
 
-def save_models(output_dir: Path) -> None:
+def save_models(
+    output_dir: Path,
+    normalization_bundle: dict[str, dict[str, dict[str, list[float]]]],
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     generalist.save(output_dir / "generalist.keras")
     technical.save(output_dir / "technical.keras")
@@ -73,16 +83,24 @@ def save_models(output_dir: Path) -> None:
     news.save(output_dir / "news.keras")
     regime.save(output_dir / "regime.keras")
     aggregation.save(output_dir / "aggregation.keras")
+    save_normalization_bundle(output_dir / NORMALIZATION_FILENAME, normalization_bundle)
 
 
 def main() -> None:
     args = parse_args()
-    inputs = prepare_model_inputs(args.dataset)
+    raw_inputs = prepare_model_inputs(args.dataset)
     targets = prepare_training_targets(args.dataset)
 
-    sample_count = inputs["generalist"].shape[0]
+    sample_count = raw_inputs["generalist"].shape[0]
     if sample_count == 0:
         raise ValueError("The dataset did not contain any training rows.")
+
+    train_rows = training_row_count(sample_count, args.validation_split)
+    specialist_normalization = fit_model_input_normalization(
+        raw_inputs,
+        train_rows=train_rows,
+    )
+    inputs = apply_model_input_normalization(raw_inputs, specialist_normalization)
 
     fit_model(
         generalist,
@@ -143,6 +161,15 @@ def main() -> None:
         earnings_pred,
         news_pred,
         regime_pred,
+        prepared_inputs=raw_inputs,
+    )
+    aggregation_normalization = fit_aggregator_input_normalization(
+        aggregator_inputs,
+        train_rows=train_rows,
+    )
+    aggregator_inputs = apply_aggregator_input_normalization(
+        aggregator_inputs,
+        aggregation_normalization,
     )
     fit_model(
         aggregation,
@@ -154,7 +181,13 @@ def main() -> None:
         early_stopping_patience=args.early_stopping_patience,
     )
 
-    save_models(args.output_dir)
+    save_models(
+        args.output_dir,
+        {
+            "specialist": specialist_normalization,
+            "aggregation": aggregation_normalization,
+        },
+    )
     print(
         f"Trained {sample_count} samples and saved models to {args.output_dir.resolve()}."
     )

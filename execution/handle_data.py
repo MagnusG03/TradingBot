@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
@@ -271,6 +271,26 @@ AGGREGATION_TARGET_FIELDS = (
     "predicted_volatility_7d",
 )
 
+NORMALIZATION_FILENAME = "normalization.json"
+
+SPECIALIST_INPUT_GROUPS = (
+    "generalist",
+    "technical",
+    "earnings",
+    "news",
+    "regime",
+    "aggregator_meta",
+)
+
+AGGREGATOR_INPUT_GROUPS = (
+    "aggregator_meta",
+    "generalist_pred",
+    "technical_pred",
+    "earnings_pred",
+    "news_pred",
+    "regime_pred",
+)
+
 
 def load_collection_data(source: Any) -> dict[str, Any] | list[dict[str, Any]]:
     if isinstance(source, Mapping):
@@ -357,8 +377,10 @@ def build_aggregator_inputs(
     earnings_output: Any,
     news_output: Any,
     regime_output: Any,
+    *,
+    prepared_inputs: Mapping[str, np.ndarray] | None = None,
 ) -> list[np.ndarray]:
-    prepared = prepare_model_inputs(source)
+    prepared = prepared_inputs if prepared_inputs is not None else prepare_model_inputs(source)
     batch_size = prepared["aggregator_meta"].shape[0]
     return [
         prepared["aggregator_meta"],
@@ -389,6 +411,71 @@ def prepare_training_dataset(
     source: Any,
 ) -> tuple[dict[str, np.ndarray], dict[str, dict[str, np.ndarray]]]:
     return prepare_model_inputs(source), prepare_training_targets(source)
+
+
+def training_row_count(sample_count: int, validation_split: float) -> int:
+    if sample_count < 0:
+        raise ValueError("sample_count must be non-negative.")
+    if not 0.0 <= validation_split < 1.0:
+        raise ValueError("validation_split must be in the range [0.0, 1.0).")
+    if sample_count == 0:
+        return 0
+    if validation_split == 0.0:
+        return sample_count
+    return max(1, int(sample_count * (1.0 - validation_split)))
+
+
+def fit_model_input_normalization(
+    inputs: Mapping[str, np.ndarray],
+    *,
+    train_rows: int | None = None,
+) -> dict[str, dict[str, list[float]]]:
+    selected = {name: inputs[name] for name in SPECIALIST_INPUT_GROUPS}
+    return _fit_normalization(selected, INPUT_NORMALIZATION_MASKS, train_rows=train_rows)
+
+
+def apply_model_input_normalization(
+    inputs: Mapping[str, np.ndarray],
+    normalization: Mapping[str, Mapping[str, Sequence[float]]],
+) -> dict[str, np.ndarray]:
+    return _apply_normalization(inputs, normalization)
+
+
+def fit_aggregator_input_normalization(
+    inputs: Sequence[np.ndarray],
+    *,
+    train_rows: int | None = None,
+) -> dict[str, dict[str, list[float]]]:
+    named = _named_aggregator_inputs(inputs)
+    return _fit_normalization(
+        named,
+        AGGREGATOR_INPUT_NORMALIZATION_MASKS,
+        train_rows=train_rows,
+    )
+
+
+def apply_aggregator_input_normalization(
+    inputs: Sequence[np.ndarray],
+    normalization: Mapping[str, Mapping[str, Sequence[float]]],
+) -> list[np.ndarray]:
+    named = _named_aggregator_inputs(inputs)
+    normalized = _apply_normalization(named, normalization)
+    return [normalized[name] for name in AGGREGATOR_INPUT_GROUPS]
+
+
+def save_normalization_bundle(path: str | Path, bundle: Mapping[str, Any]) -> None:
+    target = Path(path)
+    with target.open("w", encoding="utf-8") as handle:
+        json.dump(_to_plain_data(bundle), handle, indent=2)
+
+
+def load_normalization_bundle(path: str | Path) -> dict[str, Any]:
+    target = Path(path)
+    with target.open("r", encoding="utf-8") as handle:
+        loaded = json.load(handle)
+    if not isinstance(loaded, Mapping):
+        raise TypeError(f"Normalization bundle at {target} must be a JSON object.")
+    return dict(loaded)
 
 
 def _feature_vector(
@@ -458,6 +545,26 @@ def _shared_context_15(ctx: Mapping[str, Any]) -> list[float]:
     )
 
 
+def _shared_context_14_mask() -> list[bool]:
+    return (
+        [False] * len(MARKET_SESSION_ORDER)
+        + [False, False, False]
+        + [False, False, False]
+        + [False, False, False]
+        + [False, False]
+        + [False, False]
+        + [False, False]
+        + [True, False]
+        + [True, False]
+        + [False, False]
+        + [True, False]
+    )
+
+
+def _shared_context_15_mask() -> list[bool]:
+    return _shared_context_14_mask() + [False, False, False]
+
+
 def _session_one_hot(value: Any) -> list[float]:
     return _one_hot(
         _enum_name(value),
@@ -496,6 +603,18 @@ def _encode_feature(section: Mapping[str, Any], name: str) -> list[float]:
         return _bool_feature(value)
 
     return _numeric_feature(value)
+
+
+def _feature_mask(name: str) -> list[bool]:
+    if name == "market_regime":
+        return [False] * len(MARKET_REGIME_ORDER)
+    if name == "dominant_news_category":
+        return [False] * len(NEWS_CATEGORY_ORDER)
+    if name in BOOL_WITH_AVAILABILITY_FIELDS:
+        return [False, False]
+    if name in VALUE_WITH_AVAILABILITY_DEFAULTS:
+        return [True, False]
+    return [True]
 
 
 def _one_hot(value: str, order: tuple[str, ...], unknown_label: str) -> list[float]:
@@ -603,6 +722,74 @@ def _stack(rows: Iterable[np.ndarray]) -> np.ndarray:
     return _array(list(rows))
 
 
+def _fit_normalization(
+    inputs: Mapping[str, np.ndarray],
+    masks: Mapping[str, np.ndarray],
+    *,
+    train_rows: int | None = None,
+) -> dict[str, dict[str, list[float]]]:
+    stats: dict[str, dict[str, list[float]]] = {}
+    for name, values in inputs.items():
+        matrix = _array(values)
+        if matrix.ndim != 2:
+            raise ValueError(f"{name} inputs must be a 2D matrix, got shape {matrix.shape}.")
+
+        mask = np.asarray(masks[name], dtype=bool)
+        if mask.shape[0] != matrix.shape[1]:
+            raise ValueError(
+                f"{name} normalization mask has length {mask.shape[0]}, expected {matrix.shape[1]}."
+            )
+
+        fit_rows = matrix if train_rows is None else matrix[: min(train_rows, matrix.shape[0])]
+        mean = np.zeros(matrix.shape[1], dtype=np.float32)
+        scale = np.ones(matrix.shape[1], dtype=np.float32)
+
+        if fit_rows.shape[0] == 0:
+            stats[name] = {"mean": mean.tolist(), "scale": scale.tolist()}
+            continue
+
+        if np.any(mask):
+            selected = fit_rows[:, mask]
+            mean_values = selected.mean(axis=0)
+            scale_values = selected.std(axis=0)
+            scale_values = np.where(scale_values > 1e-6, scale_values, 1.0)
+            mean[mask] = mean_values.astype(np.float32)
+            scale[mask] = scale_values.astype(np.float32)
+
+        stats[name] = {"mean": mean.tolist(), "scale": scale.tolist()}
+
+    return stats
+
+
+def _apply_normalization(
+    inputs: Mapping[str, np.ndarray],
+    normalization: Mapping[str, Mapping[str, Sequence[float]]],
+) -> dict[str, np.ndarray]:
+    normalized: dict[str, np.ndarray] = {}
+    for name, values in inputs.items():
+        matrix = _array(values)
+        params = normalization[name]
+        mean = _array(params["mean"])
+        scale = _array(params["scale"])
+        if mean.shape[0] != matrix.shape[1] or scale.shape[0] != matrix.shape[1]:
+            raise ValueError(
+                f"{name} normalization dimensions do not match input width {matrix.shape[1]}."
+            )
+        normalized[name] = _array((matrix - mean) / scale)
+    return normalized
+
+
+def _named_aggregator_inputs(inputs: Sequence[np.ndarray]) -> dict[str, np.ndarray]:
+    if len(inputs) != len(AGGREGATOR_INPUT_GROUPS):
+        raise ValueError(
+            f"Expected {len(AGGREGATOR_INPUT_GROUPS)} aggregator inputs, got {len(inputs)}."
+        )
+    return {
+        name: _array(values)
+        for name, values in zip(AGGREGATOR_INPUT_GROUPS, inputs, strict=True)
+    }
+
+
 def _prediction_matrix(values: Any, expected_width: int, expected_rows: int) -> np.ndarray:
     if isinstance(values, (list, tuple)):
         # Keras multi-head predictions often come back as a list of (batch, 1) arrays.
@@ -684,4 +871,46 @@ INPUT_WIDTHS = {
     + sum(_feature_width(name) for name in REGIME_FIELDS),
     "aggregator_meta": len(_shared_context_14({}))
     + sum(_feature_width(name) for name in AGGREGATOR_META_FIELDS),
+}
+
+INPUT_NORMALIZATION_MASKS = {
+    "generalist": np.asarray(
+        _shared_context_14_mask()
+        + [flag for name in GENERALIST_FIELDS for flag in _feature_mask(name)],
+        dtype=bool,
+    ),
+    "technical": np.asarray(
+        _shared_context_15_mask()
+        + [flag for name in TECHNICAL_FIELDS for flag in _feature_mask(name)],
+        dtype=bool,
+    ),
+    "earnings": np.asarray(
+        _shared_context_14_mask()
+        + [flag for name in EARNINGS_FIELDS for flag in _feature_mask(name)],
+        dtype=bool,
+    ),
+    "news": np.asarray(
+        _shared_context_15_mask()
+        + [flag for name in NEWS_FIELDS for flag in _feature_mask(name)],
+        dtype=bool,
+    ),
+    "regime": np.asarray(
+        _shared_context_14_mask()
+        + [flag for name in REGIME_FIELDS for flag in _feature_mask(name)],
+        dtype=bool,
+    ),
+    "aggregator_meta": np.asarray(
+        _shared_context_14_mask()
+        + [flag for name in AGGREGATOR_META_FIELDS for flag in _feature_mask(name)],
+        dtype=bool,
+    ),
+}
+
+AGGREGATOR_INPUT_NORMALIZATION_MASKS = {
+    "aggregator_meta": INPUT_NORMALIZATION_MASKS["aggregator_meta"],
+    "generalist_pred": np.asarray([True, True], dtype=bool),
+    "technical_pred": np.asarray([True, True], dtype=bool),
+    "earnings_pred": np.asarray([True, True], dtype=bool),
+    "news_pred": np.asarray([True, True, True], dtype=bool),
+    "regime_pred": np.asarray([True, True], dtype=bool),
 }

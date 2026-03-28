@@ -6,7 +6,14 @@ from pathlib import Path
 
 from tensorflow import keras
 
-from handle_data import build_aggregator_inputs, prepare_model_inputs
+from handle_data import (
+    apply_aggregator_input_normalization,
+    apply_model_input_normalization,
+    build_aggregator_inputs,
+    load_normalization_bundle,
+    NORMALIZATION_FILENAME,
+    prepare_model_inputs,
+)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -38,7 +45,9 @@ def model_dir(ticker: str) -> Path:
 
 def models_exist(ticker: str) -> bool:
     directory = model_dir(ticker)
-    return all((directory / name).exists() for name in MODEL_FILES)
+    return all((directory / name).exists() for name in MODEL_FILES) and (
+        directory / NORMALIZATION_FILENAME
+    ).exists()
 
 
 def train_if_needed(ticker: str) -> Path:
@@ -85,10 +94,12 @@ def load_models(ticker: str) -> dict[str, keras.Model]:
 
 for live_file in sorted(LIVE_DIR.glob("*_live_dataset.json")):
     ticker = ticker_from_live_file(live_file)
-    train_if_needed(ticker)
+    directory = train_if_needed(ticker)
     models = load_models(ticker)
+    normalization = load_normalization_bundle(directory / NORMALIZATION_FILENAME)
 
-    inputs = prepare_model_inputs(live_file)
+    raw_inputs = prepare_model_inputs(live_file)
+    inputs = apply_model_input_normalization(raw_inputs, normalization["specialist"])
 
     generalist_out = models["generalist"].predict(inputs["generalist"], verbose=0)
     technical_out = models["technical"].predict(inputs["technical"], verbose=0)
@@ -103,6 +114,11 @@ for live_file in sorted(LIVE_DIR.glob("*_live_dataset.json")):
         earnings_out,
         news_out,
         regime_out,
+        prepared_inputs=raw_inputs,
+    )
+    aggregator_inputs = apply_aggregator_input_normalization(
+        aggregator_inputs,
+        normalization["aggregation"],
     )
     final_out = models["aggregation"].predict(aggregator_inputs, verbose=0)
 
