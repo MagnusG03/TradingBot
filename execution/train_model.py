@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from tensorflow.keras.callbacks import EarlyStopping
+
 from handle_data import (
     build_aggregator_inputs,
     prepare_model_inputs,
@@ -20,6 +22,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--validation-split", type=float, default=0.2)
     parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=3,
+        help="Stop training after this many epochs without validation loss improvement.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("models"),
@@ -36,7 +44,15 @@ def fit_model(
     epochs: int,
     batch_size: int,
     validation_split: float,
+    early_stopping_patience: int,
 ):
+    callbacks = [
+        EarlyStopping(
+            monitor="val_loss",
+            patience=early_stopping_patience,
+            restore_best_weights=True,
+        )
+    ]
     return model.fit(
         inputs,
         targets,
@@ -45,6 +61,7 @@ def fit_model(
         validation_split=validation_split,
         shuffle=True,
         verbose=1,
+        callbacks=callbacks,
     )
 
 
@@ -74,6 +91,7 @@ def main() -> None:
         epochs=args.epochs,
         batch_size=args.batch_size,
         validation_split=args.validation_split,
+        early_stopping_patience=args.early_stopping_patience,
     )
     fit_model(
         technical,
@@ -82,6 +100,7 @@ def main() -> None:
         epochs=args.epochs,
         batch_size=args.batch_size,
         validation_split=args.validation_split,
+        early_stopping_patience=args.early_stopping_patience,
     )
     fit_model(
         earnings,
@@ -90,6 +109,7 @@ def main() -> None:
         epochs=args.epochs,
         batch_size=args.batch_size,
         validation_split=args.validation_split,
+        early_stopping_patience=args.early_stopping_patience,
     )
     fit_model(
         news,
@@ -98,6 +118,7 @@ def main() -> None:
         epochs=args.epochs,
         batch_size=args.batch_size,
         validation_split=args.validation_split,
+        early_stopping_patience=args.early_stopping_patience,
     )
     fit_model(
         regime,
@@ -106,6 +127,7 @@ def main() -> None:
         epochs=args.epochs,
         batch_size=args.batch_size,
         validation_split=args.validation_split,
+        early_stopping_patience=args.early_stopping_patience,
     )
 
     generalist_pred = generalist.predict(inputs["generalist"], verbose=0)
@@ -129,6 +151,7 @@ def main() -> None:
         epochs=args.epochs,
         batch_size=args.batch_size,
         validation_split=args.validation_split,
+        early_stopping_patience=args.early_stopping_patience,
     )
 
     save_models(args.output_dir)
